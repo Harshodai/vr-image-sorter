@@ -1,0 +1,7 @@
+fastapi==0.109.0
+uvicorn==0.27.0
+python-multipart==0.0.6
+opencv-python-headless==4.9.0.80
+pyzbar==0.1.9
+easyocr==1.7.1
+numpy==1.26.3
