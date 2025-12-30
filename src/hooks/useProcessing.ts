@@ -3,7 +3,7 @@ import { UploadedImage, ProcessingResult, ProcessedFile, AppState } from '@/type
 
 // Configure your backend URL here
 // const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vaarahi-silks-service.onrender.com';
-const API_BASE_URL = 'https://vaarahi-silks-service.onrender.com';
+const API_BASE_URL = 'https://vr-image-sorter-production.up.railway.app';
 
 export function useProcessing() {
   const [state, setState] = useState<AppState>('upload');
