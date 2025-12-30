@@ -24,6 +24,7 @@ export interface ProcessingResult {
   processedFiles: ProcessedFile[];
   failedFiles: ProcessedFile[];
   downloadUrl?: string;
+  failedDownloadUrl?: string;
 }
 
 export type AppState = 'upload' | 'processing' | 'results';
