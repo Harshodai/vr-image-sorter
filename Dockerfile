@@ -8,7 +8,6 @@ FROM python:3.13-slim
 RUN apt-get update && apt-get install -y \
     libzbar0 \
     libgl1 \
-    libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -25,5 +24,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Command to run the application using Render's PORT or default to 8000
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"

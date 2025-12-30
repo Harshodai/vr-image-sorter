@@ -1,73 +1,75 @@
-# Welcome to your Lovable project
 
-## Project info
+# VR Image Sorter
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+Automatic image sorting and renaming tool for Saree inventory. It scans images for "VR" barcodes or text (using OCR) and renames files to match their VR number (e.g., `VR12345.jpg`).
 
-## How can I edit this code?
+## Project Structure
 
-There are several ways of editing your application.
+- **Backend**: Python (FastAPI, OpenCV, EasyOCR, PyZBar). Handles image processing.
+- **Frontend**: React (Vite, Tailwind). User interface for uploading and downloading.
 
-**Use Lovable**
+## Backend Setup
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+### Option 1: Docker (Recommended for Deployment)
+The backend requires system dependencies (`zbar`, `libgl`, etc.) which are pre-configured in the Dockerfile.
 
-Changes made via Lovable will be committed automatically to this repo.
+**Build and Run:**
+```bash
+docker build -t saree-backend .
+docker run -p 8000:8000 saree-backend
+```
 
-**Use your preferred IDE**
+**Deploy to Render:**
+1. Connect your repo to [Render](https://render.com).
+2. Create a **Web Service**.
+3. Select **Docker** as the Runtime.
+4. Render will automatically build and deploy using the `Dockerfile`.
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+### Option 2: Local Development
+If running locally without Docker, you must install the required system libraries.
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+**Prerequisites:**
+- Python 3.10+
+- **Windows**: [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+- **Linux**: `apt-get install libzbar0 libgl1`
 
-Follow these steps:
+**Installation:**
+```bash
+# Create virtual environment
+python -m venv .venv
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+# Activate it (Windows)
+.\.venv\Scripts\activate
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+# Install dependencies
+pip install -r requirements.txt
+```
 
-# Step 3: Install the necessary dependencies.
-npm i
+**Run Server:**
+```bash
+uvicorn main:app --reload --port 8000
+```
+Server runs at: `http://localhost:8000`
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+## Frontend Setup
+
+The frontend is a standard Vite React app.
+
+```bash
+# Install dependencies
+npm install
+
+# Run development server
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+## API Usage
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+- **Endpoint**: `POST /api/process`
+- **Body**: Multipart form-data with `files` (list of images).
+- **Response**: JSON with processed filenames and download URL.
 
-**Use GitHub Codespaces**
-
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
-
-## What technologies are used for this project?
-
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## Features
+- **Hybrid Scanning**: Tries fast barcode scanning first, falls back to AI-powered OCR (EasyOCR).
+- **Robustness**: Handles rotated images, noise, and partial blurs.
+- **Bulk Processing**: Upload multiple images at once.
