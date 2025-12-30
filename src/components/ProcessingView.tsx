@@ -1,6 +1,17 @@
 import { Loader2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 
 interface ProcessingViewProps {
   currentIndex: number;
@@ -38,14 +49,28 @@ export function ProcessingView({ currentIndex, totalFiles, onCancel }: Processin
         <span className="font-semibold text-foreground">{totalFiles}</span>
       </p>
 
-      <Button
-        variant="destructive"
-        onClick={onCancel}
-        className="gap-2"
-      >
-        <XCircle className="w-4 h-4" />
-        Cancel Processing
-      </Button>
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button variant="destructive" className="gap-2">
+            <XCircle className="w-4 h-4" />
+            Cancel Processing
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel Processing?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to cancel? Progress will be lost and you'll need to start over.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Continue Processing</AlertDialogCancel>
+            <AlertDialogAction onClick={onCancel} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Yes, Cancel
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
