@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Install CPU-only PyTorch (much smaller, fixes Render timeout/RAM issues)
+# Install CPU-only PyTorch
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-# Copy requirements and install remaining dependencies
+# Copy and install requirements with pinned versions
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

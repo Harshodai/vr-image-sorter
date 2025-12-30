@@ -12,6 +12,8 @@ import shutil
 import zipfile
 from typing import List, Optional
 import uuid
+import time
+from fastapi import BackgroundTasks
 
 app = FastAPI(title="Saree Organizer API")
 
@@ -238,7 +240,6 @@ async def process_images(files: List[UploadFile] = File(...)):
         for f in os.listdir(output_dir):
             zf.write(os.path.join(output_dir, f), f)
     
-    import time
     temp_dirs[session_id] = {
         "path": temp_dir,
         "created_at": time.time()
@@ -264,7 +265,7 @@ async def download_zip(session_id: str, background_tasks: BackgroundTasks):
     if session_id not in temp_dirs:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    zip_path = os.path.join(temp_dirs[session_id], "output.zip")
+    zip_path = os.path.join(temp_dirs[session_id]["path"], "output.zip")
     if not os.path.exists(zip_path):
          raise HTTPException(status_code=404, detail="Zip file not found")
          

@@ -4,4 +4,5 @@ python-multipart==0.0.6
 opencv-python-headless==4.9.0.80
 pyzbar==0.1.9
 easyocr==1.7.1
-numpy==1.26.3
+numpy==1.26.4
+scipy==1.11.4
