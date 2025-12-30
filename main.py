@@ -49,7 +49,7 @@ class SareeSorter:
         if self.reader is None:
             print("Initializing OCR Reader (this may take a moment)...")
             # verbose=False prevents encoding errors on Windows console
-            self.reader = easyocr.Reader(['en'], verbose=False) 
+            self.reader = easyocr.Reader(['en'], verbose=False, gpu=False) 
         return self.reader
 
     def preprocess_image(self, image, method):
