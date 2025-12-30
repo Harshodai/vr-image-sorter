@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import { UploadedImage, ProcessingResult, ProcessedFile, AppState } from '@/types';
 
 // Configure your backend URL here
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vaarahi-silks.onrender.com';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vaarahi-silks-service.onrender.com';
 
 export function useProcessing() {
   const [state, setState] = useState<AppState>('upload');
