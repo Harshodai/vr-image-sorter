@@ -61,6 +61,7 @@ export function useProcessing() {
         processedFiles,
         failedFiles,
         downloadUrl: data.download_url,
+        failedDownloadUrl: data.failed_download_url,
       });
 
       setState('results');

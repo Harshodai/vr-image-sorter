@@ -1,10 +1,11 @@
-import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw } from 'lucide-react';
-import { ProcessingResult } from '@/types';
+import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw, Maximize2 } from 'lucide-react';
+import { ProcessingResult, ProcessedFile } from '@/types';
 import { Button } from '@/components/ui/button';
 import { StatsCard } from './StatsCard';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
+import { ImageLightbox } from './ImageLightbox';
 
 interface ResultsViewProps {
   result: ProcessingResult;
@@ -13,13 +14,21 @@ interface ResultsViewProps {
 
 export function ResultsView({ result, onReset }: ResultsViewProps) {
   const [showFailed, setShowFailed] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<ProcessedFile | null>(null);
 
   const handleDownload = () => {
     if (result.downloadUrl) {
       window.open(result.downloadUrl, '_blank');
     } else {
-      // Demo mode: create a mock download
       alert('In demo mode: Connect to backend for actual ZIP download.\n\nWhen backend is running, this will download a ZIP file with all processed images.');
+    }
+  };
+
+  const handleDownloadFailed = () => {
+    if (result.failedDownloadUrl) {
+      window.open(result.failedDownloadUrl, '_blank');
+    } else {
+      alert('In demo mode: Connect to backend for actual ZIP download.\n\nWhen backend is running, this will download a ZIP file with all failed images.');
     }
   };
 
@@ -75,7 +84,8 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
             {result.processedFiles.slice(0, 12).map((file, index) => (
               <div
                 key={index}
-                className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-border group"
+                className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-border group cursor-pointer"
+                onClick={() => file.preview && setLightboxImage(file)}
               >
                 {file.preview && (
                   <img
@@ -84,8 +94,12 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                     className="w-full h-full object-cover"
                   />
                 )}
-                <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-foreground/80 to-transparent">
-                  <p className="text-xs text-primary-foreground font-medium truncate">
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
+                <div className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <Maximize2 className="w-4 h-4 text-white drop-shadow-lg" />
+                </div>
+                <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 to-transparent">
+                  <p className="text-xs text-white font-medium truncate">
                     {file.newName}
                   </p>
                 </div>
@@ -111,7 +125,7 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
           </CollapsibleTrigger>
           <CollapsibleContent className="mt-2">
             <div className="bg-destructive/5 rounded-lg p-4 border border-destructive/20">
-              <ul className="space-y-1">
+              <ul className="space-y-1 mb-4">
                 {result.failedFiles.map((file, index) => (
                   <li key={index} className="text-sm text-muted-foreground flex items-center gap-2">
                     <XCircle className="w-4 h-4 text-destructive flex-shrink-0" />
@@ -119,6 +133,15 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                   </li>
                 ))}
               </ul>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleDownloadFailed}
+                className="gap-2"
+              >
+                <Download className="w-4 h-4" />
+                Download Failed Images
+              </Button>
             </div>
           </CollapsibleContent>
         </Collapsible>
@@ -144,6 +167,15 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
           Process More Images
         </Button>
       </div>
+
+      {lightboxImage && lightboxImage.preview && (
+        <ImageLightbox
+          isOpen={!!lightboxImage}
+          onClose={() => setLightboxImage(null)}
+          imageSrc={lightboxImage.preview}
+          imageName={lightboxImage.newName}
+        />
+      )}
     </div>
   );
 }
