@@ -25,7 +25,21 @@ app.add_middleware(
 )
 
 # Store temp directories for cleanup
+# Store temp directories with timestamp for cleanup
 temp_dirs = {}
+
+def cleanup_session(session_id: str):
+    """Refactored cleanup logic"""
+    if session_id in temp_dirs:
+        path = temp_dirs[session_id]["path"]
+        try:
+            if os.path.exists(path):
+                shutil.rmtree(path)
+            print(f"Cleaned up session {session_id}")
+        except Exception as e:
+            print(f"Error cleaning up session {session_id}: {e}")
+        finally:
+            del temp_dirs[session_id]
 
 class SareeSorter:
     def __init__(self):
@@ -224,7 +238,17 @@ async def process_images(files: List[UploadFile] = File(...)):
         for f in os.listdir(output_dir):
             zf.write(os.path.join(output_dir, f), f)
     
-    temp_dirs[session_id] = temp_dir
+    import time
+    temp_dirs[session_id] = {
+        "path": temp_dir,
+        "created_at": time.time()
+    }
+    
+    # Trigger cleanup of old sessions (older than 1 hour)
+    current_time = time.time()
+    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > 3600]
+    for sid in expired:
+        cleanup_session(sid)
     
     return {
         "session_id": session_id,
@@ -233,8 +257,10 @@ async def process_images(files: List[UploadFile] = File(...)):
         "download_url": f"/api/download/{session_id}"
     }
 
+from fastapi import BackgroundTasks
+
 @app.get("/api/download/{session_id}")
-async def download_zip(session_id: str):
+async def download_zip(session_id: str, background_tasks: BackgroundTasks):
     if session_id not in temp_dirs:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -242,6 +268,9 @@ async def download_zip(session_id: str):
     if not os.path.exists(zip_path):
          raise HTTPException(status_code=404, detail="Zip file not found")
          
+    # Schedule cleanup after response is sent
+    background_tasks.add_task(cleanup_session, session_id)
+    
     return FileResponse(zip_path, filename="saree_organized.zip", media_type="application/zip")
 
 @app.get("/health")
