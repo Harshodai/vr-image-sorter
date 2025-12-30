@@ -2,7 +2,8 @@ import { useState, useCallback, useRef } from 'react';
 import { UploadedImage, ProcessingResult, ProcessedFile, AppState } from '@/types';
 
 // Configure your backend URL here
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vaarahi-silks-service.onrender.com';
+// const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vaarahi-silks-service.onrender.com';
+const API_BASE_URL = 'https://vaarahi-silks-service.onrender.com';
 
 export function useProcessing() {
   const [state, setState] = useState<AppState>('upload');
@@ -37,7 +38,7 @@ export function useProcessing() {
       }
 
       const data = await response.json();
-      
+
       const processedFiles: ProcessedFile[] = data.processed.map((item: any) => ({
         originalName: item.original_name,
         newName: item.new_name,
