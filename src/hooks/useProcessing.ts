@@ -72,8 +72,24 @@ export function useProcessing() {
         return;
       }
       setError(err instanceof Error ? err.message : 'An error occurred');
-      // Create mock result for demo purposes when backend is not available
-      simulateProcessing(images);
+      const failedFiles: ProcessedFile[] = images.map(img => ({
+        originalName: img.name,
+        newName: '',
+        success: false
+      }));
+
+      setResult({
+        stats: {
+          totalFiles: images.length,
+          processedFiles: 0,
+          failedFiles: images.length,
+          successRate: 0,
+        },
+        processedFiles: [],
+        failedFiles,
+      });
+
+      setState('results');
     }
   }, []);
 
