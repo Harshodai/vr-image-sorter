@@ -6,6 +6,7 @@ FROM python:3.13-slim
 # libglib2.0-0, libsm6, libxext6, libxrender-dev: common cv2 dependencies
 # libzbar0: for pyzbar
 RUN apt-get update && apt-get install -y \
+    build-essential \
     libzbar0 \
     libgl1 \
     libglib2.0-0 \
