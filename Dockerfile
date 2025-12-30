@@ -1,5 +1,5 @@
 
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 # Install system dependencies including those for OpenCV and ZBar
 # libgl1-mesa-glx: for OpenGL support
