@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,10 @@ from fastapi import BackgroundTasks
 from PIL import Image
 import io
 import logging
+import secrets
+import hashlib
+import hmac
+from pathlib import Path
 
 # Configure logging - server-side only, no sensitive details exposed
 logging.basicConfig(
@@ -44,6 +48,10 @@ MAX_TOTAL_SIZE = 200 * 1024 * 1024  # 200MB total per request
 MAX_IMAGE_DIMENSION = 10000  # Maximum width/height in pixels
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
+# Security: Session limits
+SESSION_TIMEOUT = 1800  # 30 minutes
+MAX_DOWNLOADS_PER_SESSION = 10  # Limit downloads per session
+
 # CORS: Use environment variable for allowed origins (security fix)
 allowed_origins = os.getenv(
     "ALLOWED_ORIGINS",
@@ -60,6 +68,73 @@ app.add_middleware(
 
 # Store temp directories with timestamp for cleanup
 temp_dirs = {}
+
+
+def generate_session_token():
+    """Generate a cryptographically secure session token"""
+    return secrets.token_urlsafe(32)
+
+
+def validate_session_token(session_id: str, authorization: Optional[str]) -> dict:
+    """Validate session exists and token is correct"""
+    if session_id not in temp_dirs:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = temp_dirs[session_id]
+    
+    # Check if session expired
+    if time.time() - session["created_at"] > SESSION_TIMEOUT:
+        cleanup_session(session_id)
+        raise HTTPException(status_code=410, detail="Session expired")
+    
+    # Require Bearer token
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization.split(" ", 1)[1]
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    # Constant-time comparison to prevent timing attacks
+    if not hmac.compare_digest(session["token_hash"], token_hash):
+        raise HTTPException(status_code=403, detail="Invalid session token")
+    
+    return session
+
+
+def validate_filename(filename: str) -> str:
+    """Validate filename to prevent path traversal attacks"""
+    # Get just the base filename, removing any path components
+    safe_filename = os.path.basename(filename)
+    
+    # Reject if the original filename contained path components
+    if safe_filename != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    # Reject path traversal patterns
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    # Reject empty or suspicious filenames
+    if not safe_filename or safe_filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    return safe_filename
+
+
+def validate_session_id(session_id: str) -> str:
+    """Validate session_id format to prevent path traversal"""
+    # Session IDs should be valid UUIDs
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    
+    # Additional safety check
+    if ".." in session_id or "/" in session_id or "\\" in session_id:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    
+    return session_id
+
 
 def cleanup_session(session_id: str):
     """Refactored cleanup logic"""
@@ -337,9 +412,16 @@ async def process_images(files: List[UploadFile] = File(...)):
         for f in os.listdir(output_dir):
             zf.write(os.path.join(output_dir, f), f)
     
+    # Generate session token for authentication
+    session_token = generate_session_token()
+    token_hash = hashlib.sha256(session_token.encode()).hexdigest()
+    
     temp_dirs[session_id] = {
         "path": temp_dir,
-        "created_at": time.time()
+        "created_at": time.time(),
+        "token_hash": token_hash,
+        "download_count": 0,
+        "access_count": 0
     }
     
     # Trigger cleanup of old sessions (older than 1 hour)
@@ -350,39 +432,87 @@ async def process_images(files: List[UploadFile] = File(...)):
     
     return {
         "session_id": session_id,
+        "session_token": session_token,  # Client must store and send this
         "processed": processed,
         "failed": failed,
         "download_url": f"/api/download/{session_id}"
     }
 
-from fastapi import BackgroundTasks
-
 @app.get("/api/download/{session_id}")
-async def download_zip(session_id: str, background_tasks: BackgroundTasks):
-    if session_id not in temp_dirs:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def download_zip(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security: Validate session_id format to prevent path traversal
+    validate_session_id(session_id)
     
-    zip_path = os.path.join(temp_dirs[session_id]["path"], "output.zip")
-    if not os.path.exists(zip_path):
-         raise HTTPException(status_code=404, detail="Zip file not found")
-         
-    # Schedule cleanup after response is sent
-    # background_tasks.add_task(cleanup_session, session_id) 
-    # COMMENTED OUT: If we clean up immediately, user can't download twice or see previews.
-    # We rely on the 1-hour expiration logic in the post endpoint.
+    # Security: Validate session token
+    session = validate_session_token(session_id, authorization)
     
-    return FileResponse(zip_path, filename="saree_organized.zip", media_type="application/zip")
+    # Security: Limit downloads per session
+    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Download limit exceeded")
+    
+    session["download_count"] += 1
+    
+    # Construct path safely
+    base_path = Path(session["path"])
+    zip_path = base_path / "output.zip"
+    
+    # Ensure resolved path is within base_path
+    try:
+        zip_path = zip_path.resolve()
+        base_path_resolved = base_path.resolve()
+        if not str(zip_path).startswith(str(base_path_resolved)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Zip file not found")
+    
+    return FileResponse(str(zip_path), filename="saree_organized.zip", media_type="application/zip")
+
 
 @app.get("/api/preview/{session_id}/{filename}")
-async def get_preview(session_id: str, filename: str):
-    if session_id not in temp_dirs:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def get_preview(
+    session_id: str,
+    filename: str,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security: Validate session_id format to prevent path traversal
+    validate_session_id(session_id)
     
-    file_path = os.path.join(temp_dirs[session_id]["path"], "output", filename)
-    if not os.path.exists(file_path):
+    # Security: Validate and sanitize filename to prevent path traversal
+    safe_filename = validate_filename(filename)
+    
+    # Security: Validate session token
+    session = validate_session_token(session_id, authorization)
+    
+    # Security: Limit access count per session
+    session["access_count"] += 1
+    if session["access_count"] > 1000:  # Reasonable limit for previews
+        raise HTTPException(status_code=429, detail="Too many requests")
+    
+    # Construct path safely using Path
+    base_path = Path(session["path"]) / "output"
+    file_path = base_path / safe_filename
+    
+    # Ensure resolved path is within base_path (critical security check)
+    try:
+        file_path = file_path.resolve()
+        base_path_resolved = base_path.resolve()
+        if not str(file_path).startswith(str(base_path_resolved)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
     
-    return FileResponse(file_path)
+    return FileResponse(str(file_path))
+
 
 @app.get("/health")
 async def health():
