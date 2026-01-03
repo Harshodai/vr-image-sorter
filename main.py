@@ -15,19 +15,32 @@ from typing import List, Optional
 import uuid
 import time
 from fastapi import BackgroundTasks
+from PIL import Image
+import io
 
 app = FastAPI(title="Saree Organizer API")
 
-# CORS for frontend
+# Security: File upload limits
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
+MAX_BATCH_SIZE = 100  # Maximum files per batch
+MAX_TOTAL_SIZE = 200 * 1024 * 1024  # 200MB total per request
+MAX_IMAGE_DIMENSION = 10000  # Maximum width/height in pixels
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+# CORS: Use environment variable for allowed origins (security fix)
+allowed_origins = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:8080,http://localhost:5173,https://lovable.dev"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-# Store temp directories for cleanup
 # Store temp directories with timestamp for cleanup
 temp_dirs = {}
 
@@ -189,6 +202,70 @@ sorter = SareeSorter()
 
 @app.post("/api/process")
 async def process_images(files: List[UploadFile] = File(...)):
+    # Security: Validate batch size
+    if len(files) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_BATCH_SIZE} files allowed per request"
+        )
+    
+    if len(files) == 0:
+        raise HTTPException(status_code=400, detail="No files provided")
+    
+    # Security: Validate all files before processing
+    validated_files = []
+    total_size = 0
+    
+    for file in files:
+        # Validate file extension
+        ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type for '{file.filename}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+            )
+        
+        # Read and validate file size
+        contents = await file.read()
+        file_size = len(contents)
+        
+        if file_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{file.filename}' exceeds maximum size of {MAX_FILE_SIZE // (1024*1024)}MB"
+            )
+        
+        total_size += file_size
+        if total_size > MAX_TOTAL_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Total upload size exceeds {MAX_TOTAL_SIZE // (1024*1024)}MB limit"
+            )
+        
+        # Validate it's actually a valid image
+        try:
+            image = Image.open(io.BytesIO(contents))
+            image.verify()
+            # Re-open after verify() as it closes the file
+            image = Image.open(io.BytesIO(contents))
+            
+            # Check dimensions to prevent huge images
+            if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Image '{file.filename}' dimensions exceed {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION} limit"
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid or corrupted image: '{file.filename}'"
+            )
+        
+        validated_files.append({"filename": file.filename, "contents": contents, "ext": ext})
+    
+    # All files validated, now process
     session_id = str(uuid.uuid4())
     temp_dir = tempfile.mkdtemp()
     output_dir = os.path.join(temp_dir, "output")
@@ -198,16 +275,15 @@ async def process_images(files: List[UploadFile] = File(...)):
     failed = []
     
     print(f"Received batch of {len(files)} files for processing with session_id: {session_id}")
-    for file in files:
+    for file_data in validated_files:
         try:
-            print(f"Processing uploaded file: {file.filename}")
-            contents = await file.read()
-            # method renamed to be clearer it takes bytes
+            contents = file_data["contents"]
+            filename = file_data["filename"]
+            ext = file_data["ext"]
+            
             result = sorter.scan_barcode_from_bytes(contents)
             
             if result:
-                print(f"Scan result for {file.filename}: {result}")
-                ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
                 clean_name = sorter.standardize_filename(result)
                 new_name = f"{clean_name}{ext}"
                 output_path = os.path.join(output_dir, new_name)
@@ -222,16 +298,19 @@ async def process_images(files: List[UploadFile] = File(...)):
                     f.write(contents)
                 
                 processed.append({
-                    "original_name": file.filename,
+                    "original_name": filename,
                     "new_name": new_name,
                     "preview_url": f"/api/preview/{session_id}/{new_name}"
                 })
             else:
-                print(f"Scan failed for {file.filename}")
-                failed.append({"original_name": file.filename})
+                print(f"Scan failed for {filename}")
+                failed.append({"original_name": filename})
         except Exception as e:
-            print(f"Error processing file {file.filename}: {e}")
-            failed.append({"original_name": file.filename})
+            print(f"Error processing file {filename}: {e}")
+            failed.append({"original_name": filename})
+        except Exception as e:
+            print(f"Error processing file {filename}: {e}")
+            failed.append({"original_name": filename})
     
     # Create ZIP
     if not os.listdir(output_dir):

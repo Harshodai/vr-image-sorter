@@ -1,8 +1,9 @@
-fastapi==0.109.0
-uvicorn==0.27.0
-python-multipart==0.0.6
-opencv-python-headless==4.9.0.80
-pyzbar==0.1.9
-easyocr==1.7.1
-numpy==1.26.4
-scipy==1.11.4
+fastapi>=0.115.0,<0.116.0
+uvicorn[standard]>=0.32.0,<0.33.0
+python-multipart>=0.0.16,<0.1.0
+opencv-python-headless>=4.10.0,<4.11.0
+pyzbar>=0.1.9,<0.2.0
+easyocr>=1.7.2,<2.0.0
+numpy>=1.26.4,<2.0.0
+scipy>=1.14.0,<2.0.0
+pillow>=10.0.0,<11.0.0
