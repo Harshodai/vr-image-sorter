@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { UploadedImage, ProcessingResult, ProcessedFile, AppState } from '@/types';
+import { UploadedImage, ProcessingResult, ProcessedFile, FailedFile, AppState } from '@/types';
 
 // Configure your backend URL here
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vr-image-sorter-production.up.railway.app';
@@ -21,8 +21,8 @@ export async function authenticatedFetch(url: string, options: RequestInit = {})
   return fetch(url, { ...options, headers });
 }
 
-// Helper to get authenticated blob URL for downloads
-export async function getAuthenticatedDownload(url: string): Promise<void> {
+// Helper to get authenticated blob URL for downloads with custom filename
+export async function getAuthenticatedDownload(url: string, filename?: string): Promise<void> {
   try {
     const response = await authenticatedFetch(url);
     if (!response.ok) {
@@ -34,7 +34,7 @@ export async function getAuthenticatedDownload(url: string): Promise<void> {
     // Create a temporary link and click it
     const link = document.createElement('a');
     link.href = blobUrl;
-    link.download = 'saree_organized.zip';
+    link.download = filename || 'download.zip';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -101,10 +101,9 @@ export function useProcessing() {
         preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
       }));
 
-      const failedFiles: ProcessedFile[] = data.failed.map((item: any) => ({
+      const failedFiles: FailedFile[] = data.failed.map((item: any) => ({
         originalName: item.original_name,
-        newName: '',
-        success: false,
+        preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
       }));
 
       setResult({
@@ -116,8 +115,10 @@ export function useProcessing() {
         },
         processedFiles,
         failedFiles,
-        downloadUrl: data.download_url ? `${API_BASE_URL}${data.download_url}` : '',
+        downloadUrl: data.download_url ? `${API_BASE_URL}${data.download_url}` : undefined,
         failedDownloadUrl: data.failed_download_url ? `${API_BASE_URL}${data.failed_download_url}` : undefined,
+        hasProcessed: data.has_processed || false,
+        hasFailed: data.has_failed || false,
       });
 
       setState('results');
@@ -127,10 +128,8 @@ export function useProcessing() {
         return;
       }
       setError(err instanceof Error ? err.message : 'An error occurred');
-      const failedFiles: ProcessedFile[] = images.map(img => ({
+      const failedFiles: FailedFile[] = images.map(img => ({
         originalName: img.name,
-        newName: '',
-        success: false
       }));
 
       setResult({
@@ -149,9 +148,8 @@ export function useProcessing() {
   }, []);
 
   const simulateProcessing = useCallback(async (images: UploadedImage[]) => {
-    // Simulated processing for demo when backend is not connected
     const processedFiles: ProcessedFile[] = [];
-    const failedFiles: ProcessedFile[] = [];
+    const failedFiles: FailedFile[] = [];
 
     for (let i = 0; i < images.length; i++) {
       setCurrentIndex(i + 1);
@@ -168,8 +166,6 @@ export function useProcessing() {
       } else {
         failedFiles.push({
           originalName: images[i].name,
-          newName: '',
-          success: false,
         });
       }
     }

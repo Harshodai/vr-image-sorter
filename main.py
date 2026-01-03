@@ -366,6 +366,10 @@ async def process_images(files: List[UploadFile] = File(...)):
     processed = []
     failed = []
     
+    # Create failed directory for storing failed images
+    failed_dir = os.path.join(temp_dir, "failed")
+    os.makedirs(failed_dir)
+    
     logger.info("Processing batch of %d files", len(files))
     for file_data in validated_files:
         try:
@@ -396,21 +400,59 @@ async def process_images(files: List[UploadFile] = File(...)):
                 })
             else:
                 logger.debug("Scan failed for file")
-                failed.append({"original_name": filename})
+                # Save failed image to failed directory
+                safe_filename = validate_filename(filename)
+                failed_path = os.path.join(failed_dir, safe_filename)
+                
+                # Handle duplicate names in failed folder
+                counter = 1
+                base_name, ext_part = os.path.splitext(safe_filename)
+                while os.path.exists(failed_path):
+                    failed_path = os.path.join(failed_dir, f"{base_name}_{counter}{ext_part}")
+                    counter += 1
+                
+                with open(failed_path, "wb") as f:
+                    f.write(contents)
+                
+                failed.append({
+                    "original_name": filename,
+                    "preview_url": f"/api/preview-failed/{session_id}/{os.path.basename(failed_path)}"
+                })
         except Exception as e:
             logger.error("Error processing file: %s", type(e).__name__)
-            failed.append({"original_name": filename})
+            # Try to save failed file even if there was an error
+            try:
+                safe_filename = validate_filename(file_data["filename"])
+                failed_path = os.path.join(failed_dir, safe_filename)
+                counter = 1
+                base_name, ext_part = os.path.splitext(safe_filename)
+                while os.path.exists(failed_path):
+                    failed_path = os.path.join(failed_dir, f"{base_name}_{counter}{ext_part}")
+                    counter += 1
+                with open(failed_path, "wb") as f:
+                    f.write(file_data["contents"])
+                failed.append({
+                    "original_name": file_data["filename"],
+                    "preview_url": f"/api/preview-failed/{session_id}/{os.path.basename(failed_path)}"
+                })
+            except Exception:
+                failed.append({"original_name": file_data["filename"]})
     
-    # Create ZIP
-    if not os.listdir(output_dir):
-        # Handle case where everything failed? 
-        # We can still make an empty zip or just return what we have.
-        pass
-
+    # Create ZIP for processed files
     zip_path = os.path.join(temp_dir, "output.zip")
-    with zipfile.ZipFile(zip_path, 'w') as zf:
-        for f in os.listdir(output_dir):
-            zf.write(os.path.join(output_dir, f), f)
+    output_files = os.listdir(output_dir)
+    if output_files:
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            for f in output_files:
+                zf.write(os.path.join(output_dir, f), f)
+    
+    # Create ZIP for failed files
+    failed_zip_path = os.path.join(temp_dir, "failed.zip")
+    failed_files_list = os.listdir(failed_dir)
+    if failed_files_list:
+        with zipfile.ZipFile(failed_zip_path, 'w') as zf:
+            for f in failed_files_list:
+                zf.write(os.path.join(failed_dir, f), f)
     
     # Generate session token for authentication
     session_token = generate_session_token()
@@ -430,13 +472,23 @@ async def process_images(files: List[UploadFile] = File(...)):
     for sid in expired:
         cleanup_session(sid)
     
-    return {
+    # Build response with appropriate download URLs
+    response_data = {
         "session_id": session_id,
         "session_token": session_token,  # Client must store and send this
         "processed": processed,
         "failed": failed,
-        "download_url": f"/api/download/{session_id}"
+        "has_processed": len(processed) > 0,
+        "has_failed": len(failed) > 0,
     }
+    
+    if output_files:
+        response_data["download_url"] = f"/api/download/{session_id}"
+    
+    if failed_files_list:
+        response_data["failed_download_url"] = f"/api/download-failed/{session_id}"
+    
+    return response_data
 
 @app.get("/api/download/{session_id}")
 async def download_zip(
@@ -473,6 +525,82 @@ async def download_zip(
         raise HTTPException(status_code=404, detail="Zip file not found")
     
     return FileResponse(str(zip_path), filename="saree_organized.zip", media_type="application/zip")
+
+
+@app.get("/api/download-failed/{session_id}")
+async def download_failed_zip(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security: Validate session_id format to prevent path traversal
+    validate_session_id(session_id)
+    
+    # Security: Validate session token
+    session = validate_session_token(session_id, authorization)
+    
+    # Security: Limit downloads per session
+    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Download limit exceeded")
+    
+    session["download_count"] += 1
+    
+    # Construct path safely
+    base_path = Path(session["path"])
+    zip_path = base_path / "failed.zip"
+    
+    # Ensure resolved path is within base_path
+    try:
+        zip_path = zip_path.resolve()
+        base_path_resolved = base_path.resolve()
+        if not str(zip_path).startswith(str(base_path_resolved)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Failed images zip not found")
+    
+    return FileResponse(str(zip_path), filename="failed_images.zip", media_type="application/zip")
+
+
+@app.get("/api/preview-failed/{session_id}/{filename}")
+async def get_failed_preview(
+    session_id: str,
+    filename: str,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security: Validate session_id format to prevent path traversal
+    validate_session_id(session_id)
+    
+    # Security: Validate and sanitize filename to prevent path traversal
+    safe_filename = validate_filename(filename)
+    
+    # Security: Validate session token
+    session = validate_session_token(session_id, authorization)
+    
+    # Security: Limit access count per session
+    session["access_count"] += 1
+    if session["access_count"] > 1000:  # Reasonable limit for previews
+        raise HTTPException(status_code=429, detail="Too many requests")
+    
+    # Construct path safely using Path - for failed folder
+    base_path = Path(session["path"]) / "failed"
+    file_path = base_path / safe_filename
+    
+    # Ensure resolved path is within base_path (critical security check)
+    try:
+        file_path = file_path.resolve()
+        base_path_resolved = base_path.resolve()
+        if not str(file_path).startswith(str(base_path_resolved)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    return FileResponse(str(file_path))
 
 
 @app.get("/api/preview/{session_id}/{filename}")
