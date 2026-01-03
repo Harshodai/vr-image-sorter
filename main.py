@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import cv2
 import numpy as np
 from pyzbar.pyzbar import decode
@@ -51,8 +52,12 @@ class SareeSorter:
         if self.reader is None:
             print("Initializing OCR Reader (this may take a moment)...")
             # verbose=False prevents encoding errors on Windows console
-            self.reader = easyocr.Reader(['en'], verbose=False, gpu=False) 
+            self.reader = easyocr.Reader(['en'], verbose=False) 
         return self.reader
+
+    def setup_directories(self):
+        # API handles directories in endpoints, but keeping for compatibility if needed
+        pass
 
     def preprocess_image(self, image, method):
         if method == "original":
@@ -81,19 +86,17 @@ class SareeSorter:
         return gray
 
     def decode_frame(self, image):
-        try:
-            barcodes = decode(image)
-            for barcode in barcodes:
-                barcode_data = barcode.data.decode("utf-8")
-                if barcode_data:
-                    return barcode_data
-        except Exception as e:
-            print(f"Error in decode_frame: {e}")
+        barcodes = decode(image)
+        for barcode in barcodes:
+            barcode_data = barcode.data.decode("utf-8")
+            if barcode_data:
+                return barcode_data
         return None
 
     def scan_ocr(self, image):
         try:
             reader = self.get_reader()
+            # Image is already a numpy array here
             
             # Preprocessing methods for OCR to handle noise/patterns
             methods = ["grayscale", "threshold_otsu", "original"]
@@ -116,19 +119,16 @@ class SareeSorter:
                         img_to_scan = processed
 
                     # Scan
-                    try:
-                        results = reader.readtext(img_to_scan)
-                        for (bbox, text, prob) in results:
-                            # Clean text
-                            clean = text.replace(" ", "").upper()
-                            # Strict matching for VR followed by digits
-                            if "VR" in clean:
-                                match = re.search(r"VR\d+", clean)
-                                if match:
-                                    print(f"Success: OCR Found {match.group(0)} with {method} at {angle} deg")
-                                    return match.group(0)
-                    except Exception as e:
-                        continue 
+                    results = reader.readtext(img_to_scan)
+                    for (bbox, text, prob) in results:
+                        # Clean text
+                        clean = text.replace(" ", "").upper()
+                        # Strict matching for VR followed by digits
+                        if "VR" in clean:
+                            match = re.search(r"VR\d+", clean)
+                            if match:
+                                print(f"Success: OCR Found {match.group(0)} with {method} at {angle} deg")
+                                return match.group(0)
         except Exception as e:
             print(f"OCR specific error: {e}")
         return None
@@ -156,14 +156,13 @@ class SareeSorter:
             for angle in rotations:
                 if angle == 0:
                     img_to_scan = processed_img
-                elif angle == 90:
-                    img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_90_CLOCKWISE)
-                elif angle == 180:
-                    img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_180)
-                elif angle == 270:
-                    img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
                 else:
-                    img_to_scan = processed_img
+                    if angle == 90:
+                        img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_90_CLOCKWISE)
+                    elif angle == 180:
+                        img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_180)
+                    elif angle == 270:
+                        img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
                 
                 result = self.decode_frame(img_to_scan)
                 if result:
@@ -198,13 +197,16 @@ async def process_images(files: List[UploadFile] = File(...)):
     processed = []
     failed = []
     
+    print(f"Received batch of {len(files)} files for processing with session_id: {session_id}")
     for file in files:
         try:
+            print(f"Processing uploaded file: {file.filename}")
             contents = await file.read()
             # method renamed to be clearer it takes bytes
             result = sorter.scan_barcode_from_bytes(contents)
             
             if result:
+                print(f"Scan result for {file.filename}: {result}")
                 ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
                 clean_name = sorter.standardize_filename(result)
                 new_name = f"{clean_name}{ext}"
@@ -221,9 +223,11 @@ async def process_images(files: List[UploadFile] = File(...)):
                 
                 processed.append({
                     "original_name": file.filename,
-                    "new_name": new_name
+                    "new_name": new_name,
+                    "preview_url": f"/api/preview/{session_id}/{new_name}"
                 })
             else:
+                print(f"Scan failed for {file.filename}")
                 failed.append({"original_name": file.filename})
         except Exception as e:
             print(f"Error processing file {file.filename}: {e}")
@@ -270,9 +274,22 @@ async def download_zip(session_id: str, background_tasks: BackgroundTasks):
          raise HTTPException(status_code=404, detail="Zip file not found")
          
     # Schedule cleanup after response is sent
-    background_tasks.add_task(cleanup_session, session_id)
+    # background_tasks.add_task(cleanup_session, session_id) 
+    # COMMENTED OUT: If we clean up immediately, user can't download twice or see previews.
+    # We rely on the 1-hour expiration logic in the post endpoint.
     
     return FileResponse(zip_path, filename="saree_organized.zip", media_type="application/zip")
+
+@app.get("/api/preview/{session_id}/{filename}")
+async def get_preview(session_id: str, filename: str):
+    if session_id not in temp_dirs:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    file_path = os.path.join(temp_dirs[session_id]["path"], "output", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    return FileResponse(file_path)
 
 @app.get("/health")
 async def health():

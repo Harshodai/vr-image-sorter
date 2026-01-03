@@ -2,8 +2,8 @@ import { useState, useCallback, useRef } from 'react';
 import { UploadedImage, ProcessingResult, ProcessedFile, AppState } from '@/types';
 
 // Configure your backend URL here
-// const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vaarahi-silks-service.onrender.com';
-const API_BASE_URL = 'https://vr-image-sorter-production.up.railway.app';
+// Configure your backend URL here
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vr-image-sorter-production.up.railway.app';
 
 export function useProcessing() {
   const [state, setState] = useState<AppState>('upload');
@@ -43,7 +43,7 @@ export function useProcessing() {
         originalName: item.original_name,
         newName: item.new_name,
         success: true,
-        preview: item.preview_url,
+        preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
       }));
 
       const failedFiles: ProcessedFile[] = data.failed.map((item: any) => ({
@@ -61,8 +61,8 @@ export function useProcessing() {
         },
         processedFiles,
         failedFiles,
-        downloadUrl: data.download_url,
-        failedDownloadUrl: data.failed_download_url,
+        downloadUrl: data.download_url ? `${API_BASE_URL}${data.download_url}` : '',
+        failedDownloadUrl: data.failed_download_url ? `${API_BASE_URL}${data.failed_download_url}` : undefined,
       });
 
       setState('results');
