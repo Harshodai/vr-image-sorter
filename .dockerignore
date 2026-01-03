@@ -7,3 +7,6 @@ __pycache__
 *.pyd
 .DS_Store
 test_server.py
+node_modules
+dist
+build
