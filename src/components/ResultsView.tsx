@@ -3,30 +3,102 @@ import { ProcessingResult, ProcessedFile } from '@/types';
 import { Button } from '@/components/ui/button';
 import { StatsCard } from './StatsCard';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { ImageLightbox } from './ImageLightbox';
+import { getAuthenticatedDownload, getAuthenticatedImageUrl } from '@/hooks/useProcessing';
+import { toast } from 'sonner';
 
 interface ResultsViewProps {
   result: ProcessingResult;
   onReset: () => void;
 }
 
+// Component for authenticated image loading
+function AuthenticatedImage({ src, alt, className, onClick }: { 
+  src: string; 
+  alt: string; 
+  className?: string;
+  onClick?: () => void;
+}) {
+  const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    let blobUrl: string | null = null;
+
+    async function loadImage() {
+      try {
+        setLoading(true);
+        setError(false);
+        blobUrl = await getAuthenticatedImageUrl(src);
+        if (mounted) {
+          setImageSrc(blobUrl);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (mounted) {
+          setError(true);
+          setLoading(false);
+        }
+      }
+    }
+
+    loadImage();
+
+    return () => {
+      mounted = false;
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    };
+  }, [src]);
+
+  if (loading) {
+    return <div className={`${className} bg-muted animate-pulse`} />;
+  }
+
+  if (error || !imageSrc) {
+    return <div className={`${className} bg-muted flex items-center justify-center text-muted-foreground text-xs`}>Failed to load</div>;
+  }
+
+  return <img src={imageSrc} alt={alt} className={className} onClick={onClick} />;
+}
+
 export function ResultsView({ result, onReset }: ResultsViewProps) {
   const [showFailed, setShowFailed] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<ProcessedFile | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (result.downloadUrl) {
-      window.open(result.downloadUrl, '_blank');
+      setDownloading(true);
+      try {
+        await getAuthenticatedDownload(result.downloadUrl);
+        toast.success('Download started');
+      } catch (error) {
+        toast.error('Download failed. Please try again.');
+      } finally {
+        setDownloading(false);
+      }
     } else {
       alert('In demo mode: Connect to backend for actual ZIP download.\n\nWhen backend is running, this will download a ZIP file with all processed images.');
     }
   };
 
-  const handleDownloadFailed = () => {
+  const handleDownloadFailed = async () => {
     if (result.failedDownloadUrl) {
-      window.open(result.failedDownloadUrl, '_blank');
+      setDownloading(true);
+      try {
+        await getAuthenticatedDownload(result.failedDownloadUrl);
+        toast.success('Download started');
+      } catch (error) {
+        toast.error('Download failed. Please try again.');
+      } finally {
+        setDownloading(false);
+      }
     } else {
       alert('In demo mode: Connect to backend for actual ZIP download.\n\nWhen backend is running, this will download a ZIP file with all failed images.');
     }
@@ -88,7 +160,7 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                 onClick={() => file.preview && setLightboxImage(file)}
               >
                 {file.preview && (
-                  <img
+                  <AuthenticatedImage
                     src={file.preview}
                     alt={file.newName}
                     className="w-full h-full object-cover"
@@ -137,10 +209,11 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                 variant="destructive"
                 size="sm"
                 onClick={handleDownloadFailed}
+                disabled={downloading}
                 className="gap-2"
               >
                 <Download className="w-4 h-4" />
-                Download Failed Images
+                {downloading ? 'Downloading...' : 'Download Failed Images'}
               </Button>
             </div>
           </CollapsibleContent>
@@ -152,10 +225,11 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
         <Button
           size="lg"
           onClick={handleDownload}
+          disabled={downloading}
           className="gap-2"
         >
           <Download className="w-5 h-5" />
-          Download All as ZIP
+          {downloading ? 'Downloading...' : 'Download All as ZIP'}
         </Button>
         <Button
           size="lg"

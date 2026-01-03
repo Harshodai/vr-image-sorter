@@ -2,8 +2,59 @@ import { useState, useCallback, useRef } from 'react';
 import { UploadedImage, ProcessingResult, ProcessedFile, AppState } from '@/types';
 
 // Configure your backend URL here
-// Configure your backend URL here
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vr-image-sorter-production.up.railway.app';
+
+// Store session token securely in memory (not localStorage for security)
+let sessionToken: string | null = null;
+
+// Export getter for session token (for authenticated requests)
+export function getSessionToken(): string | null {
+  return sessionToken;
+}
+
+// Helper for authenticated fetch
+export async function authenticatedFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(options.headers);
+  if (sessionToken) {
+    headers.set('Authorization', `Bearer ${sessionToken}`);
+  }
+  return fetch(url, { ...options, headers });
+}
+
+// Helper to get authenticated blob URL for downloads
+export async function getAuthenticatedDownload(url: string): Promise<void> {
+  try {
+    const response = await authenticatedFetch(url);
+    if (!response.ok) {
+      throw new Error('Download failed');
+    }
+    const blob = await response.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    
+    // Create a temporary link and click it
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = 'saree_organized.zip';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Cleanup blob URL
+    URL.revokeObjectURL(blobUrl);
+  } catch (error) {
+    throw error;
+  }
+}
+
+// Helper to get authenticated image blob URL for previews
+export async function getAuthenticatedImageUrl(url: string): Promise<string> {
+  const response = await authenticatedFetch(url);
+  if (!response.ok) {
+    throw new Error('Failed to load image');
+  }
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+}
 
 export function useProcessing() {
   const [state, setState] = useState<AppState>('upload');
@@ -38,7 +89,11 @@ export function useProcessing() {
       }
 
       const data = await response.json();
+      
+      // Store the session token for authenticated requests
+      sessionToken = data.session_token || null;
 
+      // Create authenticated preview URLs (token will be added when fetching)
       const processedFiles: ProcessedFile[] = data.processed.map((item: any) => ({
         originalName: item.original_name,
         newName: item.new_name,
@@ -146,6 +201,8 @@ export function useProcessing() {
     setCurrentIndex(0);
     setResult(null);
     setError(null);
+    // Clear session token on reset
+    sessionToken = null;
   }, []);
 
   return {
