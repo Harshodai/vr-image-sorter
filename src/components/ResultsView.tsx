@@ -1,10 +1,8 @@
 import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw, Maximize2 } from 'lucide-react';
-import { ProcessingResult, ProcessedFile } from '@/types';
+import { ProcessingResult, ProcessedFile, FailedFile } from '@/types';
 import { Button } from '@/components/ui/button';
 import { StatsCard } from './StatsCard';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { useState, useEffect } from 'react';
-import { ChevronDown } from 'lucide-react';
 import { ImageLightbox } from './ImageLightbox';
 import { getAuthenticatedDownload, getAuthenticatedImageUrl } from '@/hooks/useProcessing';
 import { toast } from 'sonner';
@@ -68,39 +66,65 @@ function AuthenticatedImage({ src, alt, className, onClick }: {
 }
 
 export function ResultsView({ result, onReset }: ResultsViewProps) {
-  const [showFailed, setShowFailed] = useState(false);
-  const [lightboxImage, setLightboxImage] = useState<ProcessedFile | null>(null);
-  const [downloading, setDownloading] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
+  const [downloadingSuccess, setDownloadingSuccess] = useState(false);
+  const [downloadingFailed, setDownloadingFailed] = useState(false);
+  const [downloadingAll, setDownloadingAll] = useState(false);
 
-  const handleDownload = async () => {
+  const hasProcessed = result.processedFiles.length > 0;
+  const hasFailed = result.failedFiles.length > 0;
+  const hasBoth = hasProcessed && hasFailed;
+
+  const handleDownloadSuccess = async () => {
     if (result.downloadUrl) {
-      setDownloading(true);
+      setDownloadingSuccess(true);
       try {
-        await getAuthenticatedDownload(result.downloadUrl);
-        toast.success('Download started');
+        await getAuthenticatedDownload(result.downloadUrl, 'saree_organized.zip');
+        toast.success('Successfully processed images downloaded');
       } catch (error) {
         toast.error('Download failed. Please try again.');
       } finally {
-        setDownloading(false);
+        setDownloadingSuccess(false);
       }
     } else {
-      alert('In demo mode: Connect to backend for actual ZIP download.\n\nWhen backend is running, this will download a ZIP file with all processed images.');
+      toast.info('Demo mode: Connect to backend for actual ZIP download.');
     }
   };
 
   const handleDownloadFailed = async () => {
     if (result.failedDownloadUrl) {
-      setDownloading(true);
+      setDownloadingFailed(true);
       try {
-        await getAuthenticatedDownload(result.failedDownloadUrl);
-        toast.success('Download started');
+        await getAuthenticatedDownload(result.failedDownloadUrl, 'failed_images.zip');
+        toast.success('Failed images downloaded');
       } catch (error) {
         toast.error('Download failed. Please try again.');
       } finally {
-        setDownloading(false);
+        setDownloadingFailed(false);
       }
     } else {
-      alert('In demo mode: Connect to backend for actual ZIP download.\n\nWhen backend is running, this will download a ZIP file with all failed images.');
+      toast.info('Demo mode: Connect to backend for actual ZIP download.');
+    }
+  };
+
+  const handleDownloadAll = async () => {
+    setDownloadingAll(true);
+    try {
+      // Download success ZIP first
+      if (result.downloadUrl) {
+        await getAuthenticatedDownload(result.downloadUrl, 'saree_organized.zip');
+      }
+      // Small delay between downloads
+      await new Promise(resolve => setTimeout(resolve, 500));
+      // Download failed ZIP
+      if (result.failedDownloadUrl) {
+        await getAuthenticatedDownload(result.failedDownloadUrl, 'failed_images.zip');
+      }
+      toast.success('Both downloads started');
+    } catch (error) {
+      toast.error('Download failed. Please try again.');
+    } finally {
+      setDownloadingAll(false);
     }
   };
 
@@ -146,91 +170,147 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
         />
       </div>
 
-      {/* Processed Files Preview */}
-      {result.processedFiles.length > 0 && (
-        <div className="mb-6">
-          <h3 className="text-lg font-semibold text-foreground mb-4">
-            Processed Images
-          </h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-            {result.processedFiles.slice(0, 12).map((file, index) => (
-              <div
-                key={index}
-                className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-border group cursor-pointer"
-                onClick={() => file.preview && setLightboxImage(file)}
-              >
-                {file.preview && (
-                  <AuthenticatedImage
-                    src={file.preview}
-                    alt={file.newName}
-                    className="w-full h-full object-cover"
-                  />
-                )}
-                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
-                <div className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <Maximize2 className="w-4 h-4 text-white drop-shadow-lg" />
-                </div>
-                <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 to-transparent">
-                  <p className="text-xs text-white font-medium truncate">
-                    {file.newName}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-          {result.processedFiles.length > 12 && (
-            <p className="text-sm text-muted-foreground mt-2">
-              +{result.processedFiles.length - 12} more files
-            </p>
-          )}
+      {/* Download All Button - only show when both sections exist */}
+      {hasBoth && (
+        <div className="mb-8 flex justify-center">
+          <Button
+            size="lg"
+            onClick={handleDownloadAll}
+            disabled={downloadingAll || downloadingSuccess || downloadingFailed}
+            className="gap-2 bg-gradient-to-r from-primary to-primary/80"
+          >
+            <Download className="w-5 h-5" />
+            {downloadingAll ? 'Downloading Both...' : 'Download All (2 ZIP files)'}
+          </Button>
         </div>
       )}
 
-      {/* Failed Files Section */}
-      {result.failedFiles.length > 0 && (
-        <Collapsible open={showFailed} onOpenChange={setShowFailed} className="mb-8">
-          <CollapsibleTrigger asChild>
-            <Button variant="ghost" className="w-full justify-between text-destructive hover:text-destructive">
-              <span>Failed Images ({result.failedFiles.length})</span>
-              <ChevronDown className={`w-4 h-4 transition-transform ${showFailed ? 'rotate-180' : ''}`} />
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="mt-2">
-            <div className="bg-destructive/5 rounded-lg p-4 border border-destructive/20">
-              <ul className="space-y-1 mb-4">
-                {result.failedFiles.map((file, index) => (
-                  <li key={index} className="text-sm text-muted-foreground flex items-center gap-2">
-                    <XCircle className="w-4 h-4 text-destructive flex-shrink-0" />
-                    {file.originalName}
-                  </li>
-                ))}
-              </ul>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={handleDownloadFailed}
-                disabled={downloading}
-                className="gap-2"
-              >
-                <Download className="w-4 h-4" />
-                {downloading ? 'Downloading...' : 'Download Failed Images'}
-              </Button>
+      {/* Two Section Layout */}
+      <div className={`grid gap-6 mb-8 ${hasBoth ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
+        {/* Successfully Processed Section */}
+        {hasProcessed && (
+          <div className="border border-success/20 rounded-lg p-4 bg-success/5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                  <CheckCircle className="w-4 h-4 text-success" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-foreground">Successfully Processed</h3>
+                  <p className="text-sm text-muted-foreground">{result.processedFiles.length} images</p>
+                </div>
+              </div>
             </div>
-          </CollapsibleContent>
-        </Collapsible>
-      )}
+            
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">
+              {result.processedFiles.slice(0, 8).map((file, index) => (
+                <div
+                  key={index}
+                  className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-border group cursor-pointer"
+                  onClick={() => file.preview && setLightboxImage({ src: file.preview, name: file.newName })}
+                >
+                  {file.preview && (
+                    <AuthenticatedImage
+                      src={file.preview}
+                      alt={file.newName}
+                      className="w-full h-full object-cover"
+                    />
+                  )}
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
+                  <div className="absolute top-1 left-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Maximize2 className="w-3 h-3 text-white drop-shadow-lg" />
+                  </div>
+                  <div className="absolute bottom-0 left-0 right-0 p-1 bg-gradient-to-t from-black/80 to-transparent">
+                    <p className="text-[10px] text-white font-medium truncate">
+                      {file.newName}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {result.processedFiles.length > 8 && (
+              <p className="text-xs text-muted-foreground mb-4">
+                +{result.processedFiles.length - 8} more files
+              </p>
+            )}
+            
+            <Button
+              onClick={handleDownloadSuccess}
+              disabled={downloadingSuccess || downloadingAll}
+              className="w-full gap-2 bg-success hover:bg-success/90 text-success-foreground"
+            >
+              <Download className="w-4 h-4" />
+              {downloadingSuccess ? 'Downloading...' : 'Download Processed (ZIP)'}
+            </Button>
+          </div>
+        )}
 
-      {/* Action Buttons */}
-      <div className="flex flex-col sm:flex-row gap-4 justify-center">
-        <Button
-          size="lg"
-          onClick={handleDownload}
-          disabled={downloading}
-          className="gap-2"
-        >
-          <Download className="w-5 h-5" />
-          {downloading ? 'Downloading...' : 'Download All as ZIP'}
-        </Button>
+        {/* Failed Section */}
+        {hasFailed && (
+          <div className="border border-destructive/20 rounded-lg p-4 bg-destructive/5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-full bg-destructive/20 flex items-center justify-center">
+                  <XCircle className="w-4 h-4 text-destructive" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-foreground">Failed After Retry</h3>
+                  <p className="text-sm text-muted-foreground">{result.failedFiles.length} images</p>
+                </div>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">
+              {result.failedFiles.slice(0, 8).map((file, index) => (
+                <div
+                  key={index}
+                  className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-destructive/30 group cursor-pointer"
+                  onClick={() => file.preview && setLightboxImage({ src: file.preview, name: file.originalName })}
+                >
+                  {file.preview ? (
+                    <AuthenticatedImage
+                      src={file.preview}
+                      alt={file.originalName}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center bg-destructive/10">
+                      <XCircle className="w-6 h-6 text-destructive/50" />
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
+                  <div className="absolute top-1 left-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Maximize2 className="w-3 h-3 text-white drop-shadow-lg" />
+                  </div>
+                  <div className="absolute bottom-0 left-0 right-0 p-1 bg-gradient-to-t from-black/80 to-transparent">
+                    <p className="text-[10px] text-white font-medium truncate">
+                      {file.originalName}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {result.failedFiles.length > 8 && (
+              <p className="text-xs text-muted-foreground mb-4">
+                +{result.failedFiles.length - 8} more files
+              </p>
+            )}
+            
+            <Button
+              variant="destructive"
+              onClick={handleDownloadFailed}
+              disabled={downloadingFailed || downloadingAll}
+              className="w-full gap-2"
+            >
+              <Download className="w-4 h-4" />
+              {downloadingFailed ? 'Downloading...' : 'Download Failed (ZIP)'}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Process More Button */}
+      <div className="flex justify-center">
         <Button
           size="lg"
           variant="outline"
@@ -242,12 +322,12 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
         </Button>
       </div>
 
-      {lightboxImage && lightboxImage.preview && (
+      {lightboxImage && (
         <ImageLightbox
           isOpen={!!lightboxImage}
           onClose={() => setLightboxImage(null)}
-          imageSrc={lightboxImage.preview}
-          imageName={lightboxImage.newName}
+          imageSrc={lightboxImage.src}
+          imageName={lightboxImage.name}
         />
       )}
     </div>

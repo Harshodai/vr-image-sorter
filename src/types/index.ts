@@ -19,12 +19,19 @@ export interface ProcessedFile {
   preview?: string;
 }
 
+export interface FailedFile {
+  originalName: string;
+  preview?: string;
+}
+
 export interface ProcessingResult {
   stats: ProcessingStats;
   processedFiles: ProcessedFile[];
-  failedFiles: ProcessedFile[];
+  failedFiles: FailedFile[];
   downloadUrl?: string;
   failedDownloadUrl?: string;
+  hasProcessed?: boolean;
+  hasFailed?: boolean;
 }
 
 export type AppState = 'upload' | 'processing' | 'results';
