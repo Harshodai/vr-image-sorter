@@ -16,6 +16,9 @@ WORKDIR /app
 # Argument to control GPU support (defaults to false for lightweight CPU build)
 ARG USE_GPU=false
 
+# Pre-install robust NumPy version to prevent 2.x conflicts
+RUN pip install "numpy<2.0.0"
+
 # Install PyTorch based on the USE_GPU argument
 RUN if [ "$USE_GPU" = "true" ]; then \
         echo "Building with GPU support (CUDA 12.1)..."; \
