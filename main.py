@@ -1,6 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import cv2
 import numpy as np
@@ -17,8 +17,25 @@ import time
 from fastapi import BackgroundTasks
 from PIL import Image
 import io
+import logging
+
+# Configure logging - server-side only, no sensitive details exposed
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Saree Organizer API")
+
+# Global exception handler - returns generic error messages to clients
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.error("Unexpected error processing request: %s", exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An error occurred processing your request"}
+    )
 
 # Security: File upload limits
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
@@ -51,9 +68,9 @@ def cleanup_session(session_id: str):
         try:
             if os.path.exists(path):
                 shutil.rmtree(path)
-            print(f"Cleaned up session {session_id}")
+            logger.info("Cleaned up session %s", session_id)
         except Exception as e:
-            print(f"Error cleaning up session {session_id}: {e}")
+            logger.error("Error cleaning up session %s: %s", session_id, e)
         finally:
             del temp_dirs[session_id]
 
@@ -63,7 +80,7 @@ class SareeSorter:
 
     def get_reader(self):
         if self.reader is None:
-            print("Initializing OCR Reader (this may take a moment)...")
+            logger.info("Initializing OCR Reader")
             # verbose=False prevents encoding errors on Windows console
             self.reader = easyocr.Reader(['en'], verbose=False) 
         return self.reader
@@ -140,10 +157,10 @@ class SareeSorter:
                         if "VR" in clean:
                             match = re.search(r"VR\d+", clean)
                             if match:
-                                print(f"Success: OCR Found {match.group(0)} with {method} at {angle} deg")
+                                logger.debug("OCR match found")
                                 return match.group(0)
         except Exception as e:
-            print(f"OCR specific error: {e}")
+            logger.error("OCR processing error: %s", type(e).__name__)
         return None
 
     def scan_barcode_from_bytes(self, image_bytes) -> Optional[str]:
@@ -154,10 +171,10 @@ class SareeSorter:
             nparr = np.frombuffer(image_bytes, np.uint8)
             original_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if original_image is None:
-                print("Error: Could not decode image bytes")
+                logger.warning("Could not decode image bytes")
                 return None
         except Exception as e:
-            print(f"Exception reading image bytes: {e}")
+            logger.error("Image decoding error: %s", type(e).__name__)
             return None
 
         # 1. Try Barcode Scan (Fast)
@@ -179,11 +196,11 @@ class SareeSorter:
                 
                 result = self.decode_frame(img_to_scan)
                 if result:
-                    print(f"Success: Barcode Found {result} with method {method} at {angle} deg")
+                    logger.debug("Barcode match found")
                     return result
         
         # 2. Try OCR (Slow but fallback)
-        print("Barcode scan failed. Attempting OCR...")
+        logger.debug("Attempting OCR fallback")
         ocr_result = self.scan_ocr(original_image)
         if ocr_result:
             return ocr_result
@@ -274,7 +291,7 @@ async def process_images(files: List[UploadFile] = File(...)):
     processed = []
     failed = []
     
-    print(f"Received batch of {len(files)} files for processing with session_id: {session_id}")
+    logger.info("Processing batch of %d files", len(files))
     for file_data in validated_files:
         try:
             contents = file_data["contents"]
@@ -303,13 +320,10 @@ async def process_images(files: List[UploadFile] = File(...)):
                     "preview_url": f"/api/preview/{session_id}/{new_name}"
                 })
             else:
-                print(f"Scan failed for {filename}")
+                logger.debug("Scan failed for file")
                 failed.append({"original_name": filename})
         except Exception as e:
-            print(f"Error processing file {filename}: {e}")
-            failed.append({"original_name": filename})
-        except Exception as e:
-            print(f"Error processing file {filename}: {e}")
+            logger.error("Error processing file: %s", type(e).__name__)
             failed.append({"original_name": filename})
     
     # Create ZIP
