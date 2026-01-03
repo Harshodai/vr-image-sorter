@@ -12,6 +12,7 @@ export function getSessionToken(): string | null {
   return sessionToken;
 }
 
+
 // Helper for authenticated fetch
 export async function authenticatedFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
@@ -30,7 +31,7 @@ export async function getAuthenticatedDownload(url: string, filename?: string): 
     }
     const blob = await response.blob();
     const blobUrl = URL.createObjectURL(blob);
-    
+
     // Create a temporary link and click it
     const link = document.createElement('a');
     link.href = blobUrl;
@@ -38,12 +39,25 @@ export async function getAuthenticatedDownload(url: string, filename?: string): 
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
+
     // Cleanup blob URL
     URL.revokeObjectURL(blobUrl);
   } catch (error) {
     throw error;
   }
+}
+
+// Helper for single file download (processed or failed)
+export async function getAuthenticatedSingleDownload(
+  sessionId: string,
+  filename: string,
+  type: 'processed' | 'failed'
+): Promise<void> {
+  const endpoint = type === 'processed'
+    ? `/api/download-single/${sessionId}/${filename}`
+    : `/api/download-single-failed/${sessionId}/${filename}`;
+
+  await getAuthenticatedDownload(`${API_BASE_URL}${endpoint}`, filename);
 }
 
 // Helper to get authenticated image blob URL for previews
@@ -89,7 +103,7 @@ export function useProcessing() {
       }
 
       const data = await response.json();
-      
+
       // Store the session token for authenticated requests
       sessionToken = data.session_token || null;
 
@@ -119,6 +133,7 @@ export function useProcessing() {
         failedDownloadUrl: data.failed_download_url ? `${API_BASE_URL}${data.failed_download_url}` : undefined,
         hasProcessed: data.has_processed || false,
         hasFailed: data.has_failed || false,
+        sessionId: data.session_id, // Add session ID to result for retry/single download
       });
 
       setState('results');
@@ -146,6 +161,62 @@ export function useProcessing() {
       setState('results');
     }
   }, []);
+
+  const retryImages = useCallback(async (filenames: string[], sessionId: string) => {
+    try {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/retry/${sessionId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ filenames }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Retry failed');
+      }
+
+      const data = await response.json();
+
+      if (data.success && result) {
+        // Merge new results
+        const newProcessed: ProcessedFile[] = data.retried_processed.map((item: any) => ({
+          originalName: item.original_name,
+          newName: item.new_name,
+          success: true,
+          preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
+        }));
+
+        // Filter out retried files from failed list
+        const remainingFailed = result.failedFiles.filter(
+          f => !newProcessed.some(p => p.originalName === f.originalName)
+        );
+
+        const allProcessed = [...result.processedFiles, ...newProcessed];
+
+        setResult({
+          ...result,
+          stats: {
+            ...result.stats,
+            processedFiles: allProcessed.length,
+            failedFiles: remainingFailed.length,
+            successRate: Math.round((allProcessed.length / result.stats.totalFiles) * 100)
+          },
+          processedFiles: allProcessed,
+          failedFiles: remainingFailed,
+          downloadUrl: data.download_url ? `${API_BASE_URL}${data.download_url}` : result.downloadUrl,
+          failedDownloadUrl: data.failed_download_url ? `${API_BASE_URL}${data.failed_download_url}` : undefined,
+          hasProcessed: allProcessed.length > 0,
+          hasFailed: remainingFailed.length > 0
+        });
+      }
+
+      return true;
+    } catch (err) {
+      console.error(err);
+      return false;
+    }
+  }, [result]);
 
   const simulateProcessing = useCallback(async (images: UploadedImage[]) => {
     const processedFiles: ProcessedFile[] = [];
@@ -207,6 +278,7 @@ export function useProcessing() {
     result,
     error,
     processImages,
+    retryImages,
     cancelProcessing,
     reset,
   };

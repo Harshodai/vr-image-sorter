@@ -17,11 +17,13 @@ export interface ProcessedFile {
   newName: string;
   success: boolean;
   preview?: string;
+  downloadUrl?: string;
 }
 
 export interface FailedFile {
   originalName: string;
   preview?: string;
+  downloadUrl?: string;
 }
 
 export interface ProcessingResult {
@@ -32,6 +34,7 @@ export interface ProcessingResult {
   failedDownloadUrl?: string;
   hasProcessed?: boolean;
   hasFailed?: boolean;
+  sessionId?: string;
 }
 
 export type AppState = 'upload' | 'processing' | 'results';

@@ -1,21 +1,22 @@
-import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw, Maximize2 } from 'lucide-react';
+import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw, Maximize2, RefreshCw } from 'lucide-react';
 import { ProcessingResult, ProcessedFile, FailedFile } from '@/types';
 import { Button } from '@/components/ui/button';
 import { StatsCard } from './StatsCard';
 import { useState, useEffect } from 'react';
 import { ImageLightbox } from './ImageLightbox';
-import { getAuthenticatedDownload, getAuthenticatedImageUrl } from '@/hooks/useProcessing';
+import { getAuthenticatedDownload, getAuthenticatedImageUrl, getAuthenticatedSingleDownload } from '@/hooks/useProcessing';
 import { toast } from 'sonner';
 
 interface ResultsViewProps {
   result: ProcessingResult;
   onReset: () => void;
+  onRetry: (filenames: string[], sessionId: string) => Promise<boolean>;
 }
 
 // Component for authenticated image loading
-function AuthenticatedImage({ src, alt, className, onClick }: { 
-  src: string; 
-  alt: string; 
+function AuthenticatedImage({ src, alt, className, onClick }: {
+  src: string;
+  alt: string;
   className?: string;
   onClick?: () => void;
 }) {
@@ -65,11 +66,15 @@ function AuthenticatedImage({ src, alt, className, onClick }: {
   return <img src={imageSrc} alt={alt} className={className} onClick={onClick} />;
 }
 
-export function ResultsView({ result, onReset }: ResultsViewProps) {
+export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
   const [downloadingSuccess, setDownloadingSuccess] = useState(false);
   const [downloadingFailed, setDownloadingFailed] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
+
+  // Retry State
+  const [retryingFiles, setRetryingFiles] = useState<Set<string>>(new Set());
+  const [isRetryingAll, setIsRetryingAll] = useState(false);
 
   const hasProcessed = result.processedFiles.length > 0;
   const hasFailed = result.failedFiles.length > 0;
@@ -125,6 +130,53 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
       toast.error('Download failed. Please try again.');
     } finally {
       setDownloadingAll(false);
+    }
+  };
+
+  const handleSingleDownload = async (filename: string, type: 'processed' | 'failed') => {
+    if (!result.sessionId) return;
+    try {
+      await getAuthenticatedSingleDownload(result.sessionId, filename, type);
+    } catch (error) {
+      toast.error('Download failed');
+    }
+  };
+
+  const handleRetrySingle = async (filename: string) => {
+    if (!result.sessionId) return;
+
+    setRetryingFiles(prev => new Set(prev).add(filename));
+    try {
+      const success = await onRetry([filename], result.sessionId);
+      if (success) {
+        toast.success('Retried successfully');
+        // Remove from set is not strictly needed as comp will re-render with new data
+      } else {
+        toast.error('Retry failed');
+      }
+    } finally {
+      setRetryingFiles(prev => {
+        const next = new Set(prev);
+        next.delete(filename);
+        return next;
+      });
+    }
+  };
+
+  const handleRetryAll = async () => {
+    if (!result.sessionId || !hasFailed) return;
+
+    setIsRetryingAll(true);
+    const filenames = result.failedFiles.map(f => f.originalName);
+    try {
+      const success = await onRetry(filenames, result.sessionId);
+      if (success) {
+        toast.success('Retry batch completed');
+      } else {
+        toast.error('Retry batch failed');
+      }
+    } finally {
+      setIsRetryingAll(false);
     }
   };
 
@@ -201,27 +253,54 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                 </div>
               </div>
             </div>
-            
+
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">
               {result.processedFiles.slice(0, 8).map((file, index) => (
                 <div
                   key={index}
-                  className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-border group cursor-pointer"
-                  onClick={() => file.preview && setLightboxImage({ src: file.preview, name: file.newName })}
+                  className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-border group"
                 >
                   {file.preview && (
                     <AuthenticatedImage
                       src={file.preview}
                       alt={file.newName}
-                      className="w-full h-full object-cover"
+                      className="w-full h-full object-cover cursor-pointer"
+                      onClick={() => file.preview && setLightboxImage({ src: file.preview, name: file.newName })}
                     />
                   )}
-                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
-                  <div className="absolute top-1 left-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Maximize2 className="w-3 h-3 text-white drop-shadow-lg" />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors pointer-events-none" />
+
+
+                  {/* Actions Overlay - Always visible with gradient background for better visibility */}
+                  <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 backdrop-blur-[2px]">
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      className="h-10 w-10 rounded-full bg-white shadow-lg hover:bg-white/90 hover:scale-110 transition-all duration-200"
+                      title="Download Image"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSingleDownload(file.newName, 'processed');
+                      }}
+                    >
+                      <Download className="w-5 h-5 text-primary" />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      className="h-10 w-10 rounded-full bg-white shadow-lg hover:bg-white/90 hover:scale-110 transition-all duration-200"
+                      title="View Fullscreen"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (file.preview) setLightboxImage({ src: file.preview, name: file.newName });
+                      }}
+                    >
+                      <Maximize2 className="w-5 h-5 text-primary" />
+                    </Button>
                   </div>
-                  <div className="absolute bottom-0 left-0 right-0 p-1 bg-gradient-to-t from-black/80 to-transparent">
-                    <p className="text-[10px] text-white font-medium truncate">
+
+                  <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/90 via-black/50 to-transparent pointer-events-none">
+                    <p className="text-[10px] text-white font-medium truncate text-center">
                       {file.newName}
                     </p>
                   </div>
@@ -233,7 +312,7 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                 +{result.processedFiles.length - 8} more files
               </p>
             )}
-            
+
             <Button
               onClick={handleDownloadSuccess}
               disabled={downloadingSuccess || downloadingAll}
@@ -258,14 +337,24 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                   <p className="text-sm text-muted-foreground">{result.failedFiles.length} images</p>
                 </div>
               </div>
+              {/* Retry All Button */}
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs gap-1 border-destructive/30 text-destructive hover:bg-destructive/10"
+                onClick={handleRetryAll}
+                disabled={isRetryingAll}
+              >
+                <RefreshCw className={`w-3 h-3 ${isRetryingAll ? 'animate-spin' : ''}`} />
+                Retry All
+              </Button>
             </div>
-            
+
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">
               {result.failedFiles.slice(0, 8).map((file, index) => (
                 <div
                   key={index}
-                  className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-destructive/30 group cursor-pointer"
-                  onClick={() => file.preview && setLightboxImage({ src: file.preview, name: file.originalName })}
+                  className="relative aspect-square rounded-lg overflow-hidden bg-muted border border-destructive/30 group"
                 >
                   {file.preview ? (
                     <AuthenticatedImage
@@ -278,12 +367,54 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                       <XCircle className="w-6 h-6 text-destructive/50" />
                     </div>
                   )}
-                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
-                  <div className="absolute top-1 left-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Maximize2 className="w-3 h-3 text-white drop-shadow-lg" />
+
+                  {/* Actions Overlay */}
+                  <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 backdrop-blur-[2px]">
+                    {/* Retry Button */}
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      className="h-10 w-10 rounded-full bg-white shadow-lg hover:bg-white/90 hover:scale-110 transition-all duration-200"
+                      title="Retry Processing"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRetrySingle(file.originalName);
+                      }}
+                      disabled={retryingFiles.has(file.originalName)}
+                    >
+                      <RefreshCw className={`w-5 h-5 text-destructive ${retryingFiles.has(file.originalName) ? 'animate-spin' : ''}`} />
+                    </Button>
+
+                    {/* Download Button */}
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      className="h-10 w-10 rounded-full bg-white shadow-lg hover:bg-white/90 hover:scale-110 transition-all duration-200"
+                      title="Download Original"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSingleDownload(file.originalName, 'failed');
+                      }}
+                    >
+                      <Download className="w-5 h-5 text-gray-900" />
+                    </Button>
+
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      className="h-10 w-10 rounded-full bg-white shadow-lg hover:bg-white/90 hover:scale-110 transition-all duration-200"
+                      title="View Fullscreen"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (file.preview) setLightboxImage({ src: file.preview, name: file.originalName });
+                      }}
+                    >
+                      <Maximize2 className="w-5 h-5 text-gray-900" />
+                    </Button>
                   </div>
-                  <div className="absolute bottom-0 left-0 right-0 p-1 bg-gradient-to-t from-black/80 to-transparent">
-                    <p className="text-[10px] text-white font-medium truncate">
+
+                  <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/90 via-black/50 to-transparent pointer-events-none">
+                    <p className="text-[10px] text-white font-medium truncate text-center">
                       {file.originalName}
                     </p>
                   </div>
@@ -295,7 +426,7 @@ export function ResultsView({ result, onReset }: ResultsViewProps) {
                 +{result.failedFiles.length - 8} more files
               </p>
             )}
-            
+
             <Button
               variant="destructive"
               onClick={handleDownloadFailed}

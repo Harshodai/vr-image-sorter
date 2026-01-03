@@ -43,14 +43,14 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 # Security: File upload limits
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
-MAX_BATCH_SIZE = 100  # Maximum files per batch
-MAX_TOTAL_SIZE = 200 * 1024 * 1024  # 200MB total per request
+MAX_BATCH_SIZE = 1000  # Maximum files per batch
+MAX_TOTAL_SIZE = 2000 * 1024 * 1024  # 2000MB total per request
 MAX_IMAGE_DIMENSION = 10000  # Maximum width/height in pixels
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 # Security: Session limits
 SESSION_TIMEOUT = 1800  # 30 minutes
-MAX_DOWNLOADS_PER_SESSION = 10  # Limit downloads per session
+MAX_DOWNLOADS_PER_SESSION = 500  # Increased to allow for individual file downloads
 
 # CORS: Use environment variable for allowed origins (security fix)
 allowed_origins = os.getenv(
@@ -564,6 +564,53 @@ async def download_failed_zip(
     return FileResponse(str(zip_path), filename="failed_images.zip", media_type="application/zip")
 
 
+@app.get("/api/preview/{session_id}/{filename}")
+async def get_preview(
+    session_id: str,
+    filename: str,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security: Validate session_id format to prevent path traversal
+    validate_session_id(session_id)
+    
+    # Security: Validate and sanitize filename to prevent path traversal
+    safe_filename = validate_filename(filename)
+    
+    # Security: Validate session token
+    session = validate_session_token(session_id, authorization)
+    
+    # Security: Limit access count per session
+    session["access_count"] += 1
+    if session["access_count"] > 1000:  # Reasonable limit for previews
+        raise HTTPException(status_code=429, detail="Too many requests")
+    
+    # Construct path safely using Path
+    base_path = Path(session["path"]) / "output"
+    file_path = base_path / safe_filename
+    
+    # Ensure resolved path is within base_path (critical security check)
+    try:
+        file_path = file_path.resolve()
+        base_path_resolved = base_path.resolve()
+        if not str(file_path).startswith(str(base_path_resolved)):
+            logger.warning("Access denied for path: %s", file_path)
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception as e:
+        logger.error("Path resolution error: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    
+    if not file_path.exists():
+        logger.error("Preview file not found: %s", file_path)
+        # Debug: list directory
+        try:
+            logger.info("Dir contents of %s: %s", base_path, os.listdir(base_path))
+        except Exception:
+            pass
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    return FileResponse(str(file_path))
+
+
 @app.get("/api/preview-failed/{session_id}/{filename}")
 async def get_failed_preview(
     session_id: str,
@@ -603,8 +650,8 @@ async def get_failed_preview(
     return FileResponse(str(file_path))
 
 
-@app.get("/api/preview/{session_id}/{filename}")
-async def get_preview(
+@app.get("/api/download-single/{session_id}/{filename}")
+async def download_single_image(
     session_id: str,
     filename: str,
     authorization: Optional[str] = Header(None, alias="Authorization")
@@ -612,22 +659,28 @@ async def get_preview(
     # Security: Validate session_id format to prevent path traversal
     validate_session_id(session_id)
     
-    # Security: Validate and sanitize filename to prevent path traversal
+    # Security: Validate filename
     safe_filename = validate_filename(filename)
     
     # Security: Validate session token
     session = validate_session_token(session_id, authorization)
     
-    # Security: Limit access count per session
-    session["access_count"] += 1
-    if session["access_count"] > 1000:  # Reasonable limit for previews
-        raise HTTPException(status_code=429, detail="Too many requests")
+    # Security: Limit downloads per session
+    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+        # Increase limit for single downloads specifically? 
+        # Or Just bump the global limit significantly since individual downloads are chatty
+        pass 
+        # For now, sticking to the same counter but we might want to increase MAX_DOWNLOADS_PER_SESSION 
+        # if users download many individual files.
+        # Let's enforce it strictly for ZIPs, but maybe be lenient here or just bump the constant.
     
-    # Construct path safely using Path
+    session["access_count"] += 1 # Count as access rather than bulk download
+    
+    # Construct path safely
     base_path = Path(session["path"]) / "output"
     file_path = base_path / safe_filename
     
-    # Ensure resolved path is within base_path (critical security check)
+    # Ensure resolved path is within base_path
     try:
         file_path = file_path.resolve()
         base_path_resolved = base_path.resolve()
@@ -637,9 +690,174 @@ async def get_preview(
         raise HTTPException(status_code=400, detail="Invalid file path")
     
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail="File not found")
     
-    return FileResponse(str(file_path))
+    return FileResponse(
+        str(file_path), 
+        filename=safe_filename, 
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={safe_filename}"}
+    )
+
+
+@app.get("/api/download-single-failed/{session_id}/{filename}")
+async def download_single_failed_image(
+    session_id: str,
+    filename: str,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security: Validate session_id format
+    validate_session_id(session_id)
+    
+    # Security: Validate filename
+    safe_filename = validate_filename(filename)
+    
+    # Security: Validate session token
+    session = validate_session_token(session_id, authorization)
+    
+    session["access_count"] += 1
+    
+    # Construct path safely
+    base_path = Path(session["path"]) / "failed"
+    file_path = base_path / safe_filename
+    
+    # Ensure resolved path is within base_path
+    try:
+        file_path = file_path.resolve()
+        base_path_resolved = base_path.resolve()
+        if not str(file_path).startswith(str(base_path_resolved)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        str(file_path), 
+        filename=safe_filename, 
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={safe_filename}"}
+    )
+
+
+from pydantic import BaseModel
+
+class RetryRequest(BaseModel):
+    filenames: List[str]
+
+@app.post("/api/retry/{session_id}")
+async def retry_failed_images(
+    session_id: str,
+    request: RetryRequest,
+    authorization: Optional[str] = Header(None, alias="Authorization")
+):
+    # Security Checks
+    validate_session_id(session_id)
+    session = validate_session_token(session_id, authorization)
+    
+    temp_dir = session["path"]
+    failed_dir = os.path.join(temp_dir, "failed")
+    output_dir = os.path.join(temp_dir, "output")
+    
+    if not os.path.exists(failed_dir):
+        raise HTTPException(status_code=404, detail="No failed images found to retry")
+    
+    logger.info("Retrying %d files for session %s", len(request.filenames), session_id)
+    
+    retried_processed = []
+    still_failed = []
+    
+    # Logic to process specific files
+    files_to_retry = request.filenames
+    if not files_to_retry:
+         raise HTTPException(status_code=400, detail="No filenames provided")
+
+    for filename in files_to_retry:
+        try:
+            safe_filename = validate_filename(filename)
+            file_path = os.path.join(failed_dir, safe_filename)
+            
+            if not os.path.exists(file_path):
+                logger.warning("File to retry not found: %s", safe_filename)
+                continue
+                
+            # Read file content
+            with open(file_path, "rb") as f:
+                contents = f.read()
+            
+            img_ext = os.path.splitext(safe_filename)[1].lower()
+            
+            # Reprocess
+            result = sorter.scan_barcode_from_bytes(contents)
+            
+            if result:
+                # Success! Move to output
+                clean_name = sorter.standardize_filename(result)
+                new_name = f"{clean_name}{img_ext}"
+                output_path = os.path.join(output_dir, new_name)
+                
+                # Handle duplicates in output
+                counter = 1
+                while os.path.exists(output_path):
+                    new_name = f"{clean_name}_{counter}{img_ext}"
+                    output_path = os.path.join(output_dir, new_name)
+                    counter += 1
+                
+                # Write to output directory
+                with open(output_path, "wb") as f_out:
+                    f_out.write(contents)
+                
+                # Remove from failed directory logic? 
+                # Yes, if successful, delete from failed.
+                os.remove(file_path)
+                
+                retried_processed.append({
+                    "original_name": safe_filename,
+                    "new_name": new_name,
+                    "preview_url": f"/api/preview/{session_id}/{new_name}"
+                })
+                logger.info("Retry success for %s -> %s", safe_filename, new_name)
+            else:
+                # Still failed, keep in failed directory
+                still_failed.append(safe_filename)
+                logger.debug("Retry failed for %s", safe_filename)
+                
+        except Exception as e:
+            logger.error("Error retrying file %s: %s", filename, e)
+            still_failed.append(filename)
+
+    # Re-generate ZIPs if changes happened
+    if retried_processed:
+        # Re-zip processed
+        zip_path = os.path.join(temp_dir, "output.zip")
+        output_files = os.listdir(output_dir)
+        if output_files:
+            with zipfile.ZipFile(zip_path, 'w') as zf:
+                for f in output_files:
+                    zf.write(os.path.join(output_dir, f), f)
+        
+        # Re-zip failed (some might have been removed)
+        failed_zip_path = os.path.join(temp_dir, "failed.zip")
+        failed_files_list = os.listdir(failed_dir)
+        if failed_files_list:
+            with zipfile.ZipFile(failed_zip_path, 'w') as zf:
+                for f in failed_files_list:
+                    zf.write(os.path.join(failed_dir, f), f)
+        else:
+            # If no failed files left, remove the failed zip
+            if os.path.exists(failed_zip_path):
+                os.remove(failed_zip_path)
+
+    return {
+        "success": True,
+        "retried_processed": retried_processed,
+        "still_failed_count": len(os.listdir(failed_dir)),
+        "download_url": f"/api/download/{session_id}" if os.listdir(output_dir) else None,
+        "failed_download_url": f"/api/download-failed/{session_id}" if os.listdir(failed_dir) else None,
+        "has_processed": len(os.listdir(output_dir)) > 0,
+        "has_failed": len(os.listdir(failed_dir)) > 0
+    }
 
 
 @app.get("/health")

@@ -13,7 +13,7 @@ import { useProcessing } from '@/hooks/useProcessing';
 
 const Index = () => {
   const { images, addImages, removeImage, clearImages, hasImages } = useImageUpload();
-  const { state, currentIndex, result, error, processImages, cancelProcessing, reset } = useProcessing();
+  const { state, currentIndex, result, error, processImages, retryImages, cancelProcessing, reset } = useProcessing();
 
   const handleStartProcessing = () => {
     if (hasImages) {
@@ -50,13 +50,13 @@ const Index = () => {
         {state === 'upload' && (
           <>
             <HeroSection />
-            
+
             {/* Upload Section */}
             <section className="max-w-3xl mx-auto">
               <UploadZone onFilesSelected={addImages} />
-              
+
               <ImagePreviewGrid images={images} onRemove={removeImage} />
-              
+
               {hasImages && (
                 <div className="mt-8 flex flex-col sm:flex-row gap-4 justify-center animate-fade-in">
                   <Button
@@ -91,7 +91,7 @@ const Index = () => {
         )}
 
         {state === 'results' && result && (
-          <ResultsView result={result} onReset={handleReset} />
+          <ResultsView result={result} onReset={handleReset} onRetry={retryImages} />
         )}
       </main>
 
