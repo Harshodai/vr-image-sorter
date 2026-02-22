@@ -225,39 +225,46 @@ class SareeSorter:
     def scan_ocr(self, image):
         try:
             reader = self.get_reader()
-            # Image is already a numpy array here
             
-            # Preprocessing methods for OCR to handle noise/patterns
+            # Prioritize the most likely orientations first
+            # 1. Original (0) - Most images are upright
+            # 2. 90/270 - Sideways shots are common on mobile
+            # 3. 180 - Upside down is rare
+            rotations = [0, 90, 270, 180]
+            
+            # Priority preprocessing methods
             methods = ["grayscale", "threshold_otsu", "original"]
-            rotations = [0, 90, 180, 270]
 
-            for method in methods:
-                processed = self.preprocess_image(image, method)
-                
-                for angle in rotations:
-                    # Rotate
-                    if angle == 0:
-                        img_to_scan = processed
-                    elif angle == 90:
-                        img_to_scan = cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)
-                    elif angle == 180:
-                        img_to_scan = cv2.rotate(processed, cv2.ROTATE_180)
-                    elif angle == 270:
-                        img_to_scan = cv2.rotate(processed, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    else:
-                        img_to_scan = processed
+            # We reorganize the loop to try all rotations for a method before moving to the next method.
+            # CRITICAL: We exit as soon as we find ANY result to save CPU/Time.
+            for angle in rotations:
+                # Rotate first
+                if angle == 0:
+                    rotated = image
+                elif angle == 90:
+                    rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+                elif angle == 180:
+                    rotated = cv2.rotate(image, cv2.ROTATE_180)
+                elif angle == 270:
+                    rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                else:
+                    rotated = image
 
+                for method in methods:
+                    img_to_scan = self.preprocess_image(rotated, method)
+                    
                     # Scan
                     results = reader.readtext(img_to_scan)
                     for (bbox, text, prob) in results:
                         # Clean text
                         clean = text.replace(" ", "").upper()
-                        # Strict matching for VR followed by digits
                         if "VR" in clean:
                             match = re.search(r"VR\d+", clean)
                             if match:
-                                logger.debug("OCR match found")
+                                logger.debug("OCR match found at angle %d with method %s", angle, method)
                                 return match.group(0)
+            
+            logger.debug("No OCR match found after all variations")
         except Exception as e:
             logger.error("OCR processing error: %s", type(e).__name__)
         return None
