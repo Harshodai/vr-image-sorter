@@ -227,30 +227,25 @@ class SareeSorter:
             reader = self.get_reader()
             
             # Prioritize the most likely orientations first
-            # 1. Original (0) - Most images are upright
-            # 2. 90/270 - Sideways shots are common on mobile
-            # 3. 180 - Upside down is rare
             rotations = [0, 90, 270, 180]
             
             # Priority preprocessing methods
             methods = ["grayscale", "threshold_otsu", "original"]
 
-            # We reorganize the loop to try all rotations for a method before moving to the next method.
+            # Try each preprocessing method across all rotations before moving to the next method.
             # CRITICAL: We exit as soon as we find ANY result to save CPU/Time.
-            for angle in rotations:
-                # Rotate first
-                if angle == 0:
-                    rotated = image
-                elif angle == 90:
-                    rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-                elif angle == 180:
-                    rotated = cv2.rotate(image, cv2.ROTATE_180)
-                elif angle == 270:
-                    rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                else:
-                    rotated = image
+            for method in methods:
+                for angle in rotations:
+                    # Rotate first
+                    if angle == 0:
+                        rotated = image
+                    elif angle == 90:
+                        rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+                    elif angle == 180:
+                        rotated = cv2.rotate(image, cv2.ROTATE_180)
+                    else:  # angle == 270 (last possible valid angle)
+                        rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-                for method in methods:
                     img_to_scan = self.preprocess_image(rotated, method)
                     
                     # Scan
