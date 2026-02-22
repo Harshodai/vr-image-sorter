@@ -23,4 +23,4 @@ COPY --from=build /app/dist ./dist
 # Railway automatically provides the PORT environment variable
 EXPOSE 8080
 
-CMD sh -c "serve -s dist -l ${PORT:-8080}"
+CMD sh -c "serve -s dist -l tcp://0.0.0.0:${PORT:-8080}"
