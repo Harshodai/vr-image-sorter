@@ -1,8 +1,12 @@
 import { useState, useCallback, useRef } from 'react';
 import { UploadedImage, ProcessingResult, ProcessedFile, FailedFile, AppState } from '@/types';
+import { toast } from 'sonner';
 
 // Configure your backend URL here
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vr-image-sorter-production.up.railway.app';
+// Added your specific Railway backend as a hardcoded fallback
+const API_URL_RAW = import.meta.env.VITE_API_URL || 'https://vr-image-sorter-production.up.railway.app';
+// Ensure the URL does not end with a trailing slash to avoid double slashes in paths
+const API_BASE_URL = API_URL_RAW.endsWith('/') ? API_URL_RAW.slice(0, -1) : API_URL_RAW;
 
 // Store session token securely in memory (not localStorage for security)
 let sessionToken: string | null = null;
@@ -142,26 +146,17 @@ export function useProcessing() {
         setState('upload');
         return;
       }
-      setError(err instanceof Error ? err.message : 'An error occurred');
-      const failedFiles: FailedFile[] = images.map(img => ({
-        originalName: img.name,
-      }));
 
-      setResult({
-        stats: {
-          totalFiles: images.length,
-          processedFiles: 0,
-          failedFiles: images.length,
-          successRate: 0,
-        },
-        processedFiles: [],
-        failedFiles,
-      });
+      const errorMessage = err instanceof Error ? err.message : 'An error occurred';
+      setError(errorMessage);
+      toast.error(`Connection Error: ${errorMessage}. Please check if VITE_API_URL is set correctly.`);
 
-      setState('results');
+      // Don't move to results state if there was a connection error
+      setState('upload');
     }
   }, []);
 
+  
   const retryImages = useCallback(async (filenames: string[], sessionId: string) => {
     try {
       const response = await authenticatedFetch(`${API_BASE_URL}/api/retry/${sessionId}`, {

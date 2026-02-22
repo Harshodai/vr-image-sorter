@@ -60,10 +60,11 @@ MAX_DOWNLOADS_PER_SESSION = 500  # Increased to allow for individual file downlo
 ENABLE_BARCODE_SCANNER = os.getenv("ENABLE_BARCODE_SCANNER", "False").lower() == "true"
 
 # CORS: Use environment variable for allowed origins (security fix)
-allowed_origins = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:8080,http://localhost:5173,https://lovable.dev"
-).split(",")
+# We check both ALLOWED_ORIGINS and ALLOWED_DOMAINS to be forgiving of common naming conventions
+# Added your specific Railway frontend as a hardcoded fallback
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS") or os.getenv("ALLOWED_DOMAINS") or "https://vaarahi-barcode-scanner.up.railway.app,http://localhost:8080,http://localhost:5173,https://lovable.dev"
+# Robust parsing: split by comma, strip whitespace, and remove trailing slashes
+allowed_origins = [origin.strip().rstrip("/") for origin in allowed_origins_env.split(",")]
 
 app.add_middleware(
     CORSMiddleware,
