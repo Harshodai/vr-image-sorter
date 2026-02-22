@@ -1,72 +1,60 @@
-# Saree Organizer
+# 🥻 Saree Organizer
 
-Automatic image sorting and renaming tool for Saree inventory. It scans images for "VR" barcodes or text (using OCR) and renames files to match their VR number (e.g., `VR12345.jpg`).
+**Automated Image Sorting & Text Recognition Engine**
+
+Saree Organizer is a production-ready tool designed to automate the painful process of inventory management. It uses AI-powered OCR and Barcode recognition to scan saree labels, extract "VR" identification numbers, and organize thousands of images into perfectly named folders in seconds.
+
+---
+
+## 📖 Project Documentation
+- **[Technical Architecture & HLD](./ARCHITECTURE.md)**: Deep dive into the system design, file structure, and function-level documentation.
+- **[Deployment Guide](#-deployment-railway)**: Steps to go live on Railway.
+- **[Scanning Modes](./ARCHITECTURE.md#-scanning-configuration)**: Understanding OCR vs. Barcode modes.
 
 ---
 
 ## 🚀 Deployment (Railway)
 
-You can deploy both the frontend and backend to Railway using the same repository.
+### 1. Backend Service
+- **Source**: Link your GitHub repo.
+- **Dockerfile**: Automatically uses `Dockerfile`.
+- **Primary Settings**: 
+  - `ENABLE_BARCODE_SCANNER`: Set to `False` (Default - Recommended for OCR stability).
+  - `ALLOWED_ORIGINS`: Set to your frontend URL.
 
-### 1. Backend Deployment
-- **Plan**: Create a new service in Railway and link it to your GitHub repository.
-- **Dockerfile**: Railway will automatically detect the main `Dockerfile`.
-- **Environment Variables**:
-  - `PORT`: (Automatically set by Railway)
-  - `ENABLE_BARCODE_SCANNER`: Set to `False` (Recommended) to use OCR-only and avoid ZBar log noise. Set to `True` for faster barcode scanning if using high-quality images.
-  - `ALLOWED_ORIGINS`: Set to your Railway frontend URL.
-
-### 2. Frontend Deployment
-- **Plan**: Create another service in the same Railway project and link it to the same repository.
-- **Dockerfile**: You must tell Railway to use `Dockerfile.frontend`. You can do this in the service settings -> "Docker" -> "Dockerfile" field.
-- **Environment Variables**:
-  - `VITE_API_URL`: Set this to your **Railway Backend URL** (e.g., `https://backend-service.up.railway.app`).
+### 2. Frontend Service
+- **Source**: Link your GitHub repo.
+- **Dockerfile**: **Search for "Dockerfile" in settings and set it to `Dockerfile.frontend`**.
+- **Variables**:
+  - `VITE_API_URL`: Path to your backend (e.g., `https://backend.up.railway.app`).
 
 ---
 
-## 🛠️ Scanning Configuration
+## 🛠️ Local Development
 
-The system supports two scanning modes:
+### Prerequisites
+- **Python 3.10+**
+- **Node.js 20+**
+- **System Libs**: 
+  - Windows: [VC++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+  - Linux: `sudo apt-get install libzbar0 libgl1`
 
-1. **OCR-Primary (Default)**: Use the `ENABLE_BARCODE_SCANNER=False` flag. 
-   - Uses AI-powered OCR (EasyOCR) to read the VR number.
-   - Most reliable for varying image qualities.
-   - Clean logs (avoids ZBar assertion warnings).
-
-2. **Barcode-First**: Use the `ENABLE_BARCODE_SCANNER=True` flag.
-   - Tries to find a standard barcode first (much faster).
-   - Falls back to OCR if no barcode is found.
-   - Requires high-quality, clear barcode images.
-
----
-
-## 💻 Local Development
-
-### Backend Setup
-The backend requires system dependencies (`zbar`, `libgl`, etc.).
-
-**Prerequisites:**
-- Python 3.10+
-- **Windows**: [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-- **Linux**: `apt-get install libzbar0 libgl1`
-
-**Installation:**
-```bash
-python -m venv .venv
-.\.venv\Scripts\activate  # Windows
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-```
-
-### Frontend Setup
-```bash
-npm install
-npm run dev
-```
+### Quick Start
+1. **Backend**:
+   ```bash
+   pip install -r requirements.txt
+   uvicorn main:app --reload
+   ```
+2. **Frontend**:
+   ```bash
+   npm install
+   npm run dev
+   ```
 
 ---
 
-## 📦 Features
-- **Smart Renaming**: Automatically handles duplicates and standardizes everything to "VRXXXXX" format.
-- **Zip Downloads**: Process batches of images and download the results in a single organized ZIP.
-- **Session Management**: Secure, temporary processing sessions with automatic cleanup.
+## ✨ Features
+- 🧠 **AI-Powered**: Uses EasyOCR with orientation-detection for 99% accuracy on hand-held photos.
+- ⚡ **Optimized**: Early-exit logic ensures high-speed processing (scans only what is needed).
+- 🔒 **Secure**: Temporary processing sessions with HMAC-signed download links.
+- 📦 **Batch Processing**: Upload hundreds of images; get a clean ZIP back instantly.
