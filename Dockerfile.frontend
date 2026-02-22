@@ -1,18 +1,26 @@
+# Build stage
+FROM node:20-slim AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+# Production stage
 FROM node:20-slim
 
 WORKDIR /app
 
-# Copy package files (ensure you have these)
-COPY package.json package-lock.json* ./
+# Install 'serve' to run the static site
+RUN npm install -g serve
 
-# Install dependencies
-RUN npm install
+# Copy only the compiled files from the build stage
+COPY --from=build /app/dist ./dist
 
-# Copy source code
-COPY . .
-
-# Expose Vite port
+# Railway automatically provides the PORT environment variable
 EXPOSE 8080
 
-# Bind to all interfaces
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "8080"]
+CMD sh -c "serve -s dist -l ${PORT:-8080}"

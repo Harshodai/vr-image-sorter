@@ -1,32 +1,49 @@
-
-# VR Image Sorter
+# Saree Organizer
 
 Automatic image sorting and renaming tool for Saree inventory. It scans images for "VR" barcodes or text (using OCR) and renames files to match their VR number (e.g., `VR12345.jpg`).
 
-## Project Structure
+---
 
-- **Backend**: Python (FastAPI, OpenCV, EasyOCR, PyZBar). Handles image processing.
-- **Frontend**: React (Vite, Tailwind). User interface for uploading and downloading.
+## 🚀 Deployment (Railway)
 
-## Backend Setup
+You can deploy both the frontend and backend to Railway using the same repository.
 
-### Option 1: Docker (Recommended for Deployment)
-The backend requires system dependencies (`zbar`, `libgl`, etc.) which are pre-configured in the Dockerfile.
+### 1. Backend Deployment
+- **Plan**: Create a new service in Railway and link it to your GitHub repository.
+- **Dockerfile**: Railway will automatically detect the main `Dockerfile`.
+- **Environment Variables**:
+  - `PORT`: (Automatically set by Railway)
+  - `ENABLE_BARCODE_SCANNER`: Set to `False` (Recommended) to use OCR-only and avoid ZBar log noise. Set to `True` for faster barcode scanning if using high-quality images.
+  - `ALLOWED_ORIGINS`: Set to your Railway frontend URL.
 
-**Build and Run:**
-```bash
-docker build -t saree-backend .
-docker run -p 8000:8000 saree-backend
-```
+### 2. Frontend Deployment
+- **Plan**: Create another service in the same Railway project and link it to the same repository.
+- **Dockerfile**: You must tell Railway to use `Dockerfile.frontend`. You can do this in the service settings -> "Docker" -> "Dockerfile" field.
+- **Environment Variables**:
+  - `VITE_API_URL`: Set this to your **Railway Backend URL** (e.g., `https://backend-service.up.railway.app`).
 
-**Deploy to Render:**
-1. Connect your repo to [Render](https://render.com).
-2. Create a **Web Service**.
-3. Select **Docker** as the Runtime.
-4. Render will automatically build and deploy using the `Dockerfile`.
+---
 
-### Option 2: Local Development
-If running locally without Docker, you must install the required system libraries.
+## 🛠️ Scanning Configuration
+
+The system supports two scanning modes:
+
+1. **OCR-Primary (Default)**: Use the `ENABLE_BARCODE_SCANNER=False` flag. 
+   - Uses AI-powered OCR (EasyOCR) to read the VR number.
+   - Most reliable for varying image qualities.
+   - Clean logs (avoids ZBar assertion warnings).
+
+2. **Barcode-First**: Use the `ENABLE_BARCODE_SCANNER=True` flag.
+   - Tries to find a standard barcode first (much faster).
+   - Falls back to OCR if no barcode is found.
+   - Requires high-quality, clear barcode images.
+
+---
+
+## 💻 Local Development
+
+### Backend Setup
+The backend requires system dependencies (`zbar`, `libgl`, etc.).
 
 **Prerequisites:**
 - Python 3.10+
@@ -35,41 +52,21 @@ If running locally without Docker, you must install the required system librarie
 
 **Installation:**
 ```bash
-# Create virtual environment
 python -m venv .venv
-
-# Activate it (Windows)
-.\.venv\Scripts\activate
-
-# Install dependencies
+.\.venv\Scripts\activate  # Windows
 pip install -r requirements.txt
-```
-
-**Run Server:**
-```bash
 uvicorn main:app --reload --port 8000
 ```
-Server runs at: `http://localhost:8000`
 
-## Frontend Setup
-
-The frontend is a standard Vite React app.
-
+### Frontend Setup
 ```bash
-# Install dependencies
 npm install
-
-# Run development server
 npm run dev
 ```
 
-## API Usage
+---
 
-- **Endpoint**: `POST /api/process`
-- **Body**: Multipart form-data with `files` (list of images).
-- **Response**: JSON with processed filenames and download URL.
-
-## Features
-- **Hybrid Scanning**: Tries fast barcode scanning first, falls back to AI-powered OCR (EasyOCR).
-- **Robustness**: Handles rotated images, noise, and partial blurs.
-- **Bulk Processing**: Upload multiple images at once.
+## 📦 Features
+- **Smart Renaming**: Automatically handles duplicates and standardizes everything to "VRXXXXX" format.
+- **Zip Downloads**: Process batches of images and download the results in a single organized ZIP.
+- **Session Management**: Secure, temporary processing sessions with automatic cleanup.

@@ -22,6 +22,8 @@ import secrets
 import hashlib
 import hmac
 from pathlib import Path
+import sys
+from pyzbar.pyzbar import ZBarSymbol, decode
 
 # Configure logging - server-side only, no sensitive details exposed
 logging.basicConfig(
@@ -51,6 +53,11 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 # Security: Session limits
 SESSION_TIMEOUT = 1800  # 30 minutes
 MAX_DOWNLOADS_PER_SESSION = 500  # Increased to allow for individual file downloads
+
+# Configuration: Scanning methods
+# Set to True only if you have high-quality barcode images and want faster scanning.
+# Defaults to False because ZBar can be noisy and unreliable for some images.
+ENABLE_BARCODE_SCANNER = os.getenv("ENABLE_BARCODE_SCANNER", "False").lower() == "true"
 
 # CORS: Use environment variable for allowed origins (security fix)
 allowed_origins = os.getenv(
@@ -191,11 +198,27 @@ class SareeSorter:
         return gray
 
     def decode_frame(self, image):
-        barcodes = decode(image)
-        for barcode in barcodes:
-            barcode_data = barcode.data.decode("utf-8")
-            if barcode_data:
-                return barcode_data
+        if not ENABLE_BARCODE_SCANNER:
+            return None
+
+        # Restriction of symbols prevents ZBar from entering the DataBar decoder
+        # which is where the assertion failure "seg->finder >= 0" occurs.
+        symbols = [
+            ZBarSymbol.CODE128,
+            ZBarSymbol.QRCODE,
+            ZBarSymbol.CODE39,
+            ZBarSymbol.EAN13,
+            ZBarSymbol.I25
+        ]
+        
+        try:
+            barcodes = decode(image, symbols=symbols)
+            for barcode in barcodes:
+                barcode_data = barcode.data.decode("utf-8")
+                if barcode_data:
+                    return barcode_data
+        except Exception as e:
+            logger.debug("Barcode scan error: %s", str(e))
         return None
 
     def scan_ocr(self, image):
