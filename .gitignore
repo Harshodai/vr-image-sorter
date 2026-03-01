@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.pyc/
+.pycache/
+.pyc
+__pycache__/
+.venv/
+.pytest_cache/
+temp_logs/
+__pycache__/
+temp_logs/
+temp_logs/

@@ -24,6 +24,9 @@ import hmac
 from pathlib import Path
 import sys
 from pyzbar.pyzbar import ZBarSymbol, decode
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 # Configure logging - server-side only, no sensitive details exposed
 logging.basicConfig(
@@ -32,8 +35,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Saree Organizer API")
+# Sized to match CPU cores available per worker (2 threads per worker)
+_executor = ThreadPoolExecutor(max_workers=int(os.getenv("SCAN_THREADS", "2")))
 
+async def scan_in_thread(sorter_instance, image_bytes):
+    """Run CPU-heavy scanning in a thread pool so it doesn't block the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, sorter_instance.scan_barcode_from_bytes, image_bytes)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Eagerly load the OCR model at startup instead of lazy loading on first request
+    # This prevents the first user from experiencing a 10-30s delay
+    logger.info("Pre-loading OCR model into memory...")
+    sorter.get_reader()
+    logger.info("OCR model loaded successfully")
+    yield
+    # Cleanup on shutdown
+    _executor.shutdown(wait=False)
+    logger.info("Shutting down")
+
+
+app = FastAPI(title="Saree Organizer API", lifespan=lifespan)
 # Global exception handler - returns generic error messages to clients
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
@@ -57,7 +81,7 @@ MAX_DOWNLOADS_PER_SESSION = 500  # Increased to allow for individual file downlo
 # Configuration: Scanning methods
 # Set to True only if you have high-quality barcode images and want faster scanning.
 # Defaults to False because ZBar can be noisy and unreliable for some images.
-ENABLE_BARCODE_SCANNER = os.getenv("ENABLE_BARCODE_SCANNER", "False").lower() == "true"
+ENABLE_BARCODE_SCANNER = os.getenv("ENABLE_BARCODE_SCANNER", "True").lower() == "true"
 
 # CORS: Use environment variable for allowed origins (security fix)
 # We check both ALLOWED_ORIGINS and ALLOWED_DOMAINS to be forgiving of common naming conventions
@@ -195,15 +219,224 @@ class SareeSorter:
         
         if method == "adaptive_threshold":
             return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        
+        if method == "clahe":
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            return clahe.apply(gray)
 
         return gray
 
-    def decode_frame(self, image):
+    # ── Label Region Detection (the key innovation) ─────────────────────
+    def detect_label_regions(self, image):
+        """
+        Detect white/light rectangular label stickers in the image.
+        Returns a list of cropped, perspective-corrected label images
+        sorted by area (largest first).
+        
+        Strategy: White paper labels have LOW saturation compared to
+        colored fabric. We try progressively wider saturation thresholds
+        and pick the tightest one that finds valid label candidates.
+        """
+        h, w = image.shape[:2]
+        img_area = h * w
+        
+        # Convert to HSV — saturation is our primary discriminator
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1]  # saturation channel
+        val = hsv[:, :, 2]  # value channel
+        
+        # Progressive saturation thresholds: tight first, then widen.
+        # White paper: S typically < 20. Slightly off-white: S < 40.
+        # We also require minimum brightness (V > 120) to exclude shadows.
+        threshold_configs = [
+            (25, 120),   # Tight: very white labels
+            (40, 120),   # Medium: slightly tinted labels  
+            (60, 140),   # Wide: off-white or aged labels
+        ]
+        
+        for s_max, v_min in threshold_configs:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            mask[(sat < s_max) & (val > v_min)] = 255
+            
+            # Morphological operations to merge nearby white patches (text gaps)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            # Remove small noise
+            kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
+            
+            label_crops = self._extract_label_crops(image, mask, img_area)
+            if label_crops:
+                logger.debug(
+                    "Label detection hit at S<%d V>%d: %d candidates",
+                    s_max, v_min, len(label_crops)
+                )
+                return label_crops
+        
+        logger.debug("No label regions found at any threshold")
+        return []
+
+    def _extract_label_crops(self, image, mask, img_area):
+        """Extract perspective-corrected label crops from a binary mask."""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        label_crops = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # Label should be between 0.5% and 25% of image area
+            if not (img_area * 0.005 < area < img_area * 0.25):
+                continue
+            
+            # Get minimum area rotated rectangle
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.intp(box)
+            
+            # Check aspect ratio — labels are roughly rectangular (1:1 to 1:4)
+            rect_w, rect_h = rect[1]
+            if rect_w == 0 or rect_h == 0:
+                continue
+            aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
+            if aspect > 5.0:
+                continue
+            
+            # Perspective-correct the crop
+            src_pts = box.astype(np.float32)
+            src_pts = self._order_points(src_pts)
+            
+            dst_w = int(max(rect_w, rect_h))
+            dst_h = int(min(rect_w, rect_h))
+            if dst_w < 50 or dst_h < 30:
+                continue
+            
+            dst_pts = np.array([
+                [0, 0],
+                [dst_w - 1, 0],
+                [dst_w - 1, dst_h - 1],
+                [0, dst_h - 1]
+            ], dtype=np.float32)
+            
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
+            
+            # Add white padding for better barcode reading
+            pad = 10
+            padded = cv2.copyMakeBorder(warped, pad, pad, pad, pad,
+                                         cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            
+            label_crops.append((area, padded))
+        
+        # Sort by area descending (largest label first)
+        label_crops.sort(key=lambda x: x[0], reverse=True)
+        return [crop for _, crop in label_crops]
+
+    @staticmethod
+    def _order_points(pts):
+        """Order 4 points as: top-left, top-right, bottom-right, bottom-left."""
+        rect = np.zeros((4, 2), dtype=np.float32)
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]   # top-left has smallest sum
+        rect[2] = pts[np.argmax(s)]   # bottom-right has largest sum
+        d = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(d)]   # top-right has smallest diff
+        rect[3] = pts[np.argmax(d)]   # bottom-left has largest diff
+        return rect
+
+    # ── Enhanced Barcode Decoding ────────────────────────────────────────
+    def _upscale_if_small(self, image, min_width=800):
+        """Upscale image if it's too small for reliable barcode reading."""
+        h, w = image.shape[:2]
+        if w < min_width:
+            scale = min_width / w
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        return image
+
+    def decode_barcode_robust(self, image):
+        """
+        Try to decode a barcode from an image using multiple strategies:
+        upscaling, preprocessing, and rotation.
+        """
         if not ENABLE_BARCODE_SCANNER:
             return None
 
-        # Restriction of symbols prevents ZBar from entering the DataBar decoder
-        # which is where the assertion failure "seg->finder >= 0" occurs.
+        # Safe symbol types to avoid DataBar assertion crashes
+        symbols = [
+            ZBarSymbol.CODE128,
+            ZBarSymbol.QRCODE,
+            ZBarSymbol.CODE39,
+            ZBarSymbol.EAN13,
+            ZBarSymbol.I25,
+        ]
+        
+        # Try at multiple scales
+        scales = [1.0]
+        h, w = image.shape[:2]
+        
+        # Aggressive upscaling for tiny crops from low-res images
+        if w < 200:
+            scales = [5.0, 4.0, 3.0]
+        elif w < 400:
+            scales = [3.0, 2.0]
+        elif w < 800:
+            scales = [2.0, 3.0, 1.0]
+        elif w < 1200:
+            scales = [1.5, 1.0]
+        
+        # Methods include new "sharpen_heavy" which works well with Lanczos4 upscaling
+        methods = ["original", "grayscale", "threshold_otsu", "sharpen", "clahe", "sharpen_heavy"]
+        rotations = [0, 180, 90, 270]  # 180 first since labels are often upside-down
+        
+        # Strong sharpening kernel that reconstructs blurry barcode edges
+        strong_sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        
+        for scale in scales:
+            if scale != 1.0:
+                # LANCZOS4 is critical for preserving hard edges in barcodes during upscale
+                scaled = cv2.resize(image, None, fx=scale, fy=scale,
+                                     interpolation=cv2.INTER_LANCZOS4)
+            else:
+                scaled = image
+            
+            for method in methods:
+                if method == "sharpen_heavy":
+                    processed = cv2.filter2D(scaled, -1, strong_sharpen_kernel)
+                    # Apply Otsu thresholding after heavy sharpening
+                    gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                    _, processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                else:
+                    processed = self.preprocess_image(scaled, method)
+                
+                for angle in rotations:
+                    if angle == 0:
+                        img_to_scan = processed
+                    elif angle == 90:
+                        img_to_scan = cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)
+                    elif angle == 180:
+                        img_to_scan = cv2.rotate(processed, cv2.ROTATE_180)
+                    else:
+                        img_to_scan = cv2.rotate(processed, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    
+                    try:
+                        barcodes = decode(img_to_scan, symbols=symbols)
+                        for barcode in barcodes:
+                            barcode_data = barcode.data.decode("utf-8")
+                            if barcode_data:
+                                logger.debug(
+                                    "Barcode found: scale=%.1f method=%s angle=%d data=%s",
+                                    scale, method, angle, barcode_data
+                                )
+                                return barcode_data
+                    except Exception as e:
+                        logger.debug("Barcode scan error: %s", str(e))
+        
+        return None
+
+    # ── Legacy decode_frame (kept for compatibility) ────────────────────
+    def decode_frame(self, image):
+        if not ENABLE_BARCODE_SCANNER:
+            return None
         symbols = [
             ZBarSymbol.CODE128,
             ZBarSymbol.QRCODE,
@@ -211,7 +444,6 @@ class SareeSorter:
             ZBarSymbol.EAN13,
             ZBarSymbol.I25
         ]
-        
         try:
             barcodes = decode(image, symbols=symbols)
             for barcode in barcodes:
@@ -222,51 +454,161 @@ class SareeSorter:
             logger.debug("Barcode scan error: %s", str(e))
         return None
 
-    def scan_ocr(self, image):
+    # ── Enhanced OCR ────────────────────────────────────────────────────
+    def scan_ocr(self, image, roi_image=None):
+        """
+        Run OCR to find VR codes.
+        If roi_image is provided, scan that first (label crop).
+        Falls back to full image if roi_image fails.
+        """
         try:
             reader = self.get_reader()
             
-            # Prioritize the most likely orientations first
-            rotations = [0, 90, 270, 180]
+            # If we have a label crop, try it first (much faster & more accurate)
+            images_to_try = []
+            if roi_image is not None:
+                # Upscale small ROI crops for better OCR accuracy
+                roi_upscaled = self._upscale_if_small(roi_image, min_width=600)
+                images_to_try.append(("roi", roi_upscaled))
+            images_to_try.append(("full", image))
             
-            # Priority preprocessing methods
-            methods = ["grayscale", "threshold_otsu", "original"]
-
-            # Try each preprocessing method across all rotations before moving to the next method.
-            # CRITICAL: We exit as soon as we find ANY result to save CPU/Time.
-            for method in methods:
-                for angle in rotations:
-                    # Rotate first
-                    if angle == 0:
-                        rotated = image
-                    elif angle == 90:
-                        rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-                    elif angle == 180:
-                        rotated = cv2.rotate(image, cv2.ROTATE_180)
-                    else:  # angle == 270 (last possible valid angle)
-                        rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-                    img_to_scan = self.preprocess_image(rotated, method)
-                    
-                    # Scan
-                    results = reader.readtext(img_to_scan)
-                    for (bbox, text, prob) in results:
-                        # Clean text
-                        clean = text.replace(" ", "").upper()
-                        if "VR" in clean:
-                            match = re.search(r"VR\d+", clean)
-                            if match:
-                                logger.debug("OCR match found at angle %d with method %s", angle, method)
-                                return match.group(0)
+            for source_name, img in images_to_try:
+                result = self._ocr_with_rotations(reader, img)
+                if result:
+                    logger.debug("OCR match found from %s source", source_name)
+                    return result
             
             logger.debug("No OCR match found after all variations")
         except Exception as e:
             logger.error("OCR processing error: %s", type(e).__name__)
         return None
 
+    @staticmethod
+    def _clean_ocr_text(text):
+        """
+        Aggressively clean OCR text for VR code extraction.
+        OCR often reads VR221130 as 'Vr?21'Jo' or 'VRP' with garbled chars.
+        """
+        # Step 1: Remove spaces and uppercase
+        clean = text.replace(" ", "").upper()
+        # Step 2: Fix common OCR letter→digit confusions BEFORE stripping
+        ocr_digit_map = str.maketrans("OoIl|", "00111")
+        clean = clean.translate(ocr_digit_map)
+        # Step 3: Strip ALL non-alphanumeric characters (?, ', -, etc.)
+        clean = re.sub(r"[^A-Z0-9]", "", clean)
+        return clean
+
+    def _ocr_with_rotations(self, reader, image):
+        """Try OCR across rotations and preprocessing methods."""
+        rotations = [0, 180, 90, 270]  # 180 prioritized for upside-down labels
+        methods = ["grayscale", "clahe", "threshold_otsu", "original"]
+        best_match = None
+        
+        for method in methods:
+            for angle in rotations:
+                if angle == 0:
+                    rotated = image
+                elif angle == 90:
+                    rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+                elif angle == 180:
+                    rotated = cv2.rotate(image, cv2.ROTATE_180)
+                else:
+                    rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                img_to_scan = self.preprocess_image(rotated, method)
+                
+                results = reader.readtext(img_to_scan)
+
+                # Strategy 1: Check individual text boxes for VR codes
+                for (bbox, text, prob) in results:
+                    clean = self._clean_ocr_text(text)
+                    if "VR" in clean:
+                        # Try strict match first: VR followed by 2 to 8 digits (prevent matching long MRP/Phone numbers)
+                        match = re.search(r"VR\d{2,8}(?!\d)", clean)
+                        if match and (best_match is None or len(match.group(0)) > len(best_match)):
+                            logger.debug(
+                                "OCR match at angle %d method %s: %s (from box: '%s' -> '%s')",
+                                angle, method, match.group(0), text, clean
+                            )
+                            best_match = match.group(0)
+                        
+                        # Fuzzy match: VR followed by digits with possible letter noise
+                        if not match or len(match.group(0)) < 5:
+                            # Extract everything after "VR" and keep only digits
+                            vr_idx = clean.index("VR")
+                            after_vr = clean[vr_idx + 2:]
+                            # Collect leading digit-like characters
+                            digits = ""
+                            for ch in after_vr:
+                                if ch.isdigit():
+                                    digits += ch
+                                elif len(digits) >= 3:
+                                    # Stop if we've collected enough digits and hit a letter
+                                    break
+                                # Skip isolated letters within digit sequence (OCR noise)
+                            if len(digits) >= 4:
+                                candidate = f"VR{digits}"
+                                if best_match is None or len(candidate) > len(best_match):
+                                    logger.debug(
+                                        "OCR fuzzy match at angle %d method %s: %s (from: '%s')",
+                                        angle, method, candidate, clean
+                                    )
+                                    best_match = candidate
+
+            # If Strategy 1 found a valid, complete VR code (e.g. at least VR + 4 digits), SKIP Strategy 2 
+            # to prevent concatenating unwanted MRP numbers or phone numbers
+            if best_match and len(best_match) >= 6:
+                return best_match
+                
+            # Strategy 2: Concatenate all text boxes and search
+            # This catches cases where OCR splits "VR221130" into "VR22" + "1130"
+            all_text = "".join(self._clean_ocr_text(t) for _, t, _ in results)
+            if "VR" in all_text:
+                # Strict concat match: limit digits to avoid grabbing MRP
+                concat_match = re.search(r"VR\d{4,8}(?!\d)", all_text)
+                if concat_match and (best_match is None or len(concat_match.group(0)) > len(best_match)):
+                    logger.debug(
+                        "OCR concat match at angle %d method %s: %s (from: '%s')",
+                        angle, method, concat_match.group(0), all_text
+                    )
+                    best_match = concat_match.group(0)
+                
+                # Fuzzy concat: extract digits after VR
+                    vr_idx = all_text.index("VR")
+                    after_vr = all_text[vr_idx + 2:]
+                    digits = ""
+                    for ch in after_vr:
+                        if ch.isdigit():
+                            digits += ch
+                        elif len(digits) >= 3:
+                            break
+                    if len(digits) >= 4:
+                        candidate = f"VR{digits}"
+                        if best_match is None or len(candidate) > len(best_match):
+                            logger.debug(
+                                "OCR fuzzy concat match at angle %d method %s: %s",
+                                angle, method, candidate
+                            )
+                            best_match = candidate
+
+                # If we found a sufficiently long match (5+ digits), return immediately
+                if best_match and len(best_match) >= 7:  # "VR" + 5+ digits
+                    logger.debug("OCR returning high-confidence match: %s", best_match)
+                    return best_match
+
+        # Reject dangerously short partial matches (e.g. "VR22" instead of "VR221130")
+        if best_match and len(best_match) < 6:
+            logger.debug("Rejecting partial VR match '%s' (too short)", best_match)
+            return None
+            
+        return best_match
+
+    # ── Main Entry Point (Label-First Architecture) ─────────────────────
     def scan_barcode_from_bytes(self, image_bytes) -> Optional[str]:
         """
-        Attempts to scan a barcode from image bytes.
+        Attempts to scan a barcode/VR code from image bytes.
+        Uses a label-first strategy: detect the label sticker, crop it,
+        then run barcode + OCR on the clean crop.
         """
         try:
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -278,33 +620,32 @@ class SareeSorter:
             logger.error("Image decoding error: %s", type(e).__name__)
             return None
 
-        # 1. Try Barcode Scan (Fast)
-        methods = ["original", "grayscale", "sharpen", "threshold_otsu", "adaptive_threshold"]
-        rotations = [0, 90, 180, 270]
-
-        for method in methods:
-            processed_img = self.preprocess_image(original_image, method)
-            for angle in rotations:
-                if angle == 0:
-                    img_to_scan = processed_img
-                else:
-                    if angle == 90:
-                        img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_90_CLOCKWISE)
-                    elif angle == 180:
-                        img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_180)
-                    elif angle == 270:
-                        img_to_scan = cv2.rotate(processed_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                
-                result = self.decode_frame(img_to_scan)
-                if result:
-                    logger.debug("Barcode match found")
-                    return result
+        # ── Step 1: Detect label regions ─────────────────────────────
+        label_crops = self.detect_label_regions(original_image)
+        logger.debug("Detected %d label regions", len(label_crops))
         
-        # 2. Try OCR (Slow but fallback)
+        # ── Step 2: Try barcode on each label crop ───────────────────
+        # NOTE: Only run pyzbar on clean label crops, NOT on the full
+        # image. pyzbar on noisy fabric images produces false positives.
+        for i, crop in enumerate(label_crops):
+            result = self.decode_barcode_robust(crop)
+            if result:
+                logger.info("Barcode found on label crop %d", i)
+                return result
+        
+        # ── Step 3: Try OCR on label crops first, then full image ────
         logger.debug("Attempting OCR fallback")
-        ocr_result = self.scan_ocr(original_image)
+        best_roi = label_crops[0] if label_crops else None
+        ocr_result = self.scan_ocr(original_image, roi_image=best_roi)
         if ocr_result:
             return ocr_result
+        
+        # ── Step 4: If first crop failed OCR, try remaining crops ────
+        if len(label_crops) > 1:
+            for crop in label_crops[1:]:
+                ocr_result = self.scan_ocr(crop)
+                if ocr_result:
+                    return ocr_result
 
         return None
 
@@ -396,14 +737,17 @@ async def process_images(files: List[UploadFile] = File(...)):
     failed_dir = os.path.join(temp_dir, "failed")
     os.makedirs(failed_dir)
     
-    logger.info("Processing batch of %d files", len(files))
-    for file_data in validated_files:
+    logger.info("Processing batch of %d files concurrently", len(validated_files))
+    
+    async def _process_one(file_data):
+        contents = file_data["contents"]
+        filename = file_data["filename"]
+        ext = file_data["ext"]
+        safe_filename = validate_filename(filename)
+        
         try:
-            contents = file_data["contents"]
-            filename = file_data["filename"]
-            ext = file_data["ext"]
-            
-            result = sorter.scan_barcode_from_bytes(contents)
+            # Process CPU-heavy task in thread pool
+            result = await scan_in_thread(sorter, contents)
             
             if result:
                 clean_name = sorter.standardize_filename(result)
@@ -419,18 +763,15 @@ async def process_images(files: List[UploadFile] = File(...)):
                 with open(output_path, "wb") as f:
                     f.write(contents)
                 
-                processed.append({
+                return "processed", {
                     "original_name": filename,
                     "new_name": new_name,
                     "preview_url": f"/api/preview/{session_id}/{new_name}"
-                })
+                }
             else:
                 logger.debug("Scan failed for file")
-                # Save failed image to failed directory
-                safe_filename = validate_filename(filename)
                 failed_path = os.path.join(failed_dir, safe_filename)
                 
-                # Handle duplicate names in failed folder
                 counter = 1
                 base_name, ext_part = os.path.splitext(safe_filename)
                 while os.path.exists(failed_path):
@@ -440,15 +781,13 @@ async def process_images(files: List[UploadFile] = File(...)):
                 with open(failed_path, "wb") as f:
                     f.write(contents)
                 
-                failed.append({
+                return "failed", {
                     "original_name": filename,
                     "preview_url": f"/api/preview-failed/{session_id}/{os.path.basename(failed_path)}"
-                })
+                }
         except Exception as e:
             logger.error("Error processing file: %s", type(e).__name__)
-            # Try to save failed file even if there was an error
             try:
-                safe_filename = validate_filename(file_data["filename"])
                 failed_path = os.path.join(failed_dir, safe_filename)
                 counter = 1
                 base_name, ext_part = os.path.splitext(safe_filename)
@@ -456,13 +795,23 @@ async def process_images(files: List[UploadFile] = File(...)):
                     failed_path = os.path.join(failed_dir, f"{base_name}_{counter}{ext_part}")
                     counter += 1
                 with open(failed_path, "wb") as f:
-                    f.write(file_data["contents"])
-                failed.append({
-                    "original_name": file_data["filename"],
+                    f.write(contents)
+                return "failed", {
+                    "original_name": filename,
                     "preview_url": f"/api/preview-failed/{session_id}/{os.path.basename(failed_path)}"
-                })
+                }
             except Exception:
-                failed.append({"original_name": file_data["filename"]})
+                return "failed", {"original_name": filename}
+
+    # Run all file processing tasks concurrently
+    tasks = [_process_one(fd) for fd in validated_files]
+    results = await asyncio.gather(*tasks)
+    
+    for status, item in results:
+        if status == "processed":
+            processed.append(item)
+        else:
+            failed.append(item)
     
     # Create ZIP for processed files
     zip_path = os.path.join(temp_dir, "output.zip")
