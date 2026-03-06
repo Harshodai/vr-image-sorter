@@ -3,10 +3,38 @@ import { UploadedImage, ProcessingResult, ProcessedFile, FailedFile, AppState } 
 import { toast } from 'sonner';
 
 // Configure your backend URL here
-// Added your specific Railway backend as a hardcoded fallback
-const API_URL_RAW = import.meta.env.VITE_API_URL || 'https://vr-image-sorter-production.up.railway.app';
+// Priority: runtime config (injected at container startup) > Vite build-time env > hardcoded fallback
+const API_URL_RAW =
+  (typeof window !== 'undefined' && (window as any).__RUNTIME_CONFIG__?.API_URL) ||
+  import.meta.env.VITE_API_URL ||
+  'https://vr-image-sorter-production.up.railway.app';
 // Ensure the URL does not end with a trailing slash to avoid double slashes in paths
 const API_BASE_URL = API_URL_RAW.endsWith('/') ? API_URL_RAW.slice(0, -1) : API_URL_RAW;
+
+// Retry wrapper for network resilience (handles mobile screen-close, background tab throttling)
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  retries = 2,
+  baseDelayMs = 1000
+): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetch(input, init);
+    } catch (err) {
+      // Only retry on network errors (TypeError), not on AbortError or HTTP errors
+      const isNetworkError = err instanceof TypeError;
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      if (isAbort || !isNetworkError || attempt === retries) {
+        throw err;
+      }
+      // Exponential backoff: 1s, 2s
+      await new Promise(resolve => setTimeout(resolve, baseDelayMs * Math.pow(2, attempt)));
+    }
+  }
+  // Should never reach here, but TypeScript needs it
+  throw new Error('Fetch failed after retries');
+}
 
 // Store session token securely in memory (not localStorage for security)
 let sessionToken: string | null = null;
@@ -96,7 +124,7 @@ export function useProcessing() {
         setCurrentIndex(index + 1);
       });
 
-      const response = await fetch(`${API_BASE_URL}/api/process`, {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/process`, {
         method: 'POST',
         body: formData,
         signal: abortControllerRef.current.signal,
@@ -149,14 +177,20 @@ export function useProcessing() {
 
       const errorMessage = err instanceof Error ? err.message : 'An error occurred';
       setError(errorMessage);
-      toast.error(`Connection Error: ${errorMessage}. Please check if VITE_API_URL is set correctly.`);
+
+      // Show user-friendly error (not developer-facing env var names)
+      if (!navigator.onLine) {
+        toast.error('You appear to be offline. Please check your internet connection and try again.');
+      } else {
+        toast.error('Could not connect to the server. Please check your internet connection and try again.');
+      }
 
       // Don't move to results state if there was a connection error
       setState('upload');
     }
   }, []);
 
-  
+
   const retryImages = useCallback(async (filenames: string[], sessionId: string) => {
     try {
       const response = await authenticatedFetch(`${API_BASE_URL}/api/retry/${sessionId}`, {

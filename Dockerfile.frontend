@@ -25,4 +25,13 @@ COPY --from=build /app/dist ./dist
 # Railway automatically provides the PORT environment variable
 EXPOSE 8080
 
-CMD sh -c "serve -s dist -l tcp://0.0.0.0:${PORT:-8080}"
+# At container startup: inject VITE_API_URL into a config.js read by the browser,
+# so the env var set in Railway dashboard is picked up at runtime (not just build time).
+CMD sh -c "\
+  if [ -n \"$VITE_API_URL\" ]; then \
+    echo \"window.__RUNTIME_CONFIG__ = { API_URL: \\\"$VITE_API_URL\\\" };\" > /app/dist/config.js; \
+  else \
+    echo '/* No VITE_API_URL set — using build-time or fallback value */' > /app/dist/config.js; \
+  fi && \
+  serve -s dist -l tcp://0.0.0.0:${PORT:-8080}"
+
