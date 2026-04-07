@@ -25,6 +25,7 @@ from pathlib import Path
 import sys
 from pyzbar.pyzbar import ZBarSymbol, decode
 import asyncio
+import gc
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
@@ -82,6 +83,11 @@ MAX_DOWNLOADS_PER_SESSION = 500  # Increased to allow for individual file downlo
 # Set to True only if you have high-quality barcode images and want faster scanning.
 # Defaults to False because ZBar can be noisy and unreliable for some images.
 ENABLE_BARCODE_SCANNER = os.getenv("ENABLE_BARCODE_SCANNER", "True").lower() == "true"
+
+# Configuration: Batch concurrency
+# Limits how many files are scanned simultaneously to prevent CPU saturation.
+# Increase if the host has more cores; lower if you see high CPU contention.
+BATCH_CONCURRENCY = int(os.getenv("BATCH_CONCURRENCY", "2"))
 
 # CORS: Use environment variable for allowed origins (security fix)
 # We check both ALLOWED_ORIGINS and ALLOWED_DOMAINS to be forgiving of common naming conventions
@@ -737,8 +743,14 @@ async def process_images(files: List[UploadFile] = File(...)):
     failed_dir = os.path.join(temp_dir, "failed")
     os.makedirs(failed_dir)
     
-    logger.info("Processing batch of %d files concurrently", len(validated_files))
-    
+    batch_size = len(validated_files)
+    logger.info("Batch processing started: %d file(s), concurrency limit=%d", batch_size, BATCH_CONCURRENCY)
+    batch_start = time.monotonic()
+
+    # One semaphore per request — limits simultaneous CPU-heavy scans to
+    # BATCH_CONCURRENCY slots, preventing CPU saturation on large batches.
+    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
+
     async def _process_one(file_data):
         contents = file_data["contents"]
         filename = file_data["filename"]
@@ -746,8 +758,14 @@ async def process_images(files: List[UploadFile] = File(...)):
         safe_filename = validate_filename(filename)
         
         try:
-            # Process CPU-heavy task in thread pool
-            result = await scan_in_thread(sorter, contents)
+            # Acquire semaphore only around the CPU-intensive scan, not I/O
+            async with semaphore:
+                file_start = time.monotonic()
+                result = await scan_in_thread(sorter, contents)
+                elapsed = time.monotonic() - file_start
+                logger.info("File scanned in %.2fs: %s", elapsed, safe_filename)
+                # Prompt release of CV/NumPy buffers after each scan
+                gc.collect()
             
             if result:
                 clean_name = sorter.standardize_filename(result)
@@ -803,10 +821,16 @@ async def process_images(files: List[UploadFile] = File(...)):
             except Exception:
                 return "failed", {"original_name": filename}
 
-    # Run all file processing tasks concurrently
+    # Run all file processing tasks concurrently, bounded by the semaphore
     tasks = [_process_one(fd) for fd in validated_files]
     results = await asyncio.gather(*tasks)
-    
+
+    batch_elapsed = time.monotonic() - batch_start
+    logger.info(
+        "Batch processing complete: %d file(s) in %.2fs (concurrency=%d)",
+        batch_size, batch_elapsed, BATCH_CONCURRENCY
+    )
+
     for status, item in results:
         if status == "processed":
             processed.append(item)
