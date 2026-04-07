@@ -26,7 +26,7 @@ import sys
 from pyzbar.pyzbar import ZBarSymbol, decode
 import asyncio
 import gc
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import asynccontextmanager
 
 # Configure logging - server-side only, no sensitive details exposed
@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 
 # Sized to match CPU cores available per worker (2 threads per worker)
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("SCAN_THREADS", "2")))
+
+# Dedicated single-thread executor for individual readtext() calls so we can
+# enforce a hard timeout via Future.result(timeout=...) without blocking the
+# main scan thread indefinitely.
+_ocr_executor = ThreadPoolExecutor(max_workers=int(os.getenv("SCAN_THREADS", "2")))
 
 async def scan_in_thread(sorter_instance, image_bytes):
     """Run CPU-heavy scanning in a thread pool so it doesn't block the event loop."""
@@ -55,6 +60,7 @@ async def lifespan(app: FastAPI):
     yield
     # Cleanup on shutdown
     _executor.shutdown(wait=False)
+    _ocr_executor.shutdown(wait=False)
     logger.info("Shutting down")
 
 
@@ -88,6 +94,14 @@ ENABLE_BARCODE_SCANNER = os.getenv("ENABLE_BARCODE_SCANNER", "True").lower() == 
 # Limits how many files are scanned simultaneously to prevent CPU saturation.
 # Increase if the host has more cores; lower if you see high CPU contention.
 BATCH_CONCURRENCY = int(os.getenv("BATCH_CONCURRENCY", "2"))
+
+# Configuration: OCR timeout
+# Maximum seconds to wait for a single reader.readtext() call before giving up.
+# EasyOCR can hang indefinitely on certain corrupted or unusual images; this
+# cap prevents one bad image from blocking the entire batch.
+# Increase if you have very large, high-resolution images that legitimately need
+# more time; decrease for faster (but potentially less thorough) scanning.
+OCR_TIMEOUT_SECONDS = int(os.getenv("OCR_TIMEOUT_SECONDS", "10"))
 
 # CORS: Use environment variable for allowed origins (security fix)
 # We check both ALLOWED_ORIGINS and ALLOWED_DOMAINS to be forgiving of common naming conventions
@@ -522,8 +536,21 @@ class SareeSorter:
                     rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
                 img_to_scan = self.preprocess_image(rotated, method)
-                
-                results = reader.readtext(img_to_scan)
+
+                # Submit readtext() to a dedicated executor so we can enforce a
+                # hard deadline. EasyOCR occasionally hangs indefinitely on
+                # corrupted or unusual images; the timeout prevents one bad
+                # image from blocking the entire batch.
+                try:
+                    future = _ocr_executor.submit(reader.readtext, img_to_scan)
+                    results = future.result(timeout=OCR_TIMEOUT_SECONDS)
+                except FuturesTimeoutError:
+                    h, w = img_to_scan.shape[:2] if hasattr(img_to_scan, "shape") else (0, 0)
+                    logger.warning(
+                        "OCR timed out after %ds (angle=%d method=%s size=%dx%d) — skipping OCR for this image",
+                        OCR_TIMEOUT_SECONDS, angle, method, w, h,
+                    )
+                    return None
 
                 # Strategy 1: Check individual text boxes for VR codes
                 for (bbox, text, prob) in results:
