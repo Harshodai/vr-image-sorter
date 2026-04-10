@@ -13,6 +13,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Limit ONNX/RapidOCR thread usage to prevent "Resource temporarily unavailable" errors
+# With 4 workers, this keeps total threads well within Railway's limits.
+ENV OMP_NUM_THREADS=2
+ENV MKL_NUM_THREADS=2
+ENV OCR_POOL_SIZE=1
+
 # Pre-install robust NumPy version to prevent 2.x conflicts
 RUN pip install "numpy<2.0.0"
 
@@ -38,5 +44,4 @@ CMD sh -c "gunicorn main:app \
     --bind 0.0.0.0:${PORT:-8000} \
     --timeout 300 \
     --max-requests 500 \
-    --max-requests-jitter 50 \
-    --preload"
+    --max-requests-jitter 50"

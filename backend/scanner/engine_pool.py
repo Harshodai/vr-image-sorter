@@ -1,13 +1,15 @@
 import queue
 import logging
+import os
 from rapidocr_onnxruntime import RapidOCR
-from core.config import BATCH_CONCURRENCY
+from core.config import OCR_POOL_SIZE
 
 logger = logging.getLogger("vr-saree-sorter.pool")
 
 class RapidsEnginePool:
     def __init__(self, size=None):
-        self.size = size or max(2, BATCH_CONCURRENCY // 2)
+        # Default size comes from central config (set to 1 for safety)
+        self.size = size or OCR_POOL_SIZE
         self.pool = queue.Queue(maxsize=self.size)
         self._initialized = False
 
