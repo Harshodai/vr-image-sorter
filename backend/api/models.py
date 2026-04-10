@@ -29,3 +29,6 @@ class SareeDetails(BaseModel):
     amount: str
     rate: str
     discount: str
+
+class RetryRequest(BaseModel):
+    filenames: List[str]
