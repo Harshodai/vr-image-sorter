@@ -1,0 +1,14 @@
+.git
+.venv
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+test_server.py
+node_modules
+dist
+build
+tests/sandbox
+tests/debug_output

@@ -1,17 +1,9 @@
 import os
-from easyocr import Reader
+from rapidocr_onnxruntime import RapidOCR
 
-print("Starting EasyOCR model preload...")
+print("Starting RapidOCR model preload...")
 
-# triggers download of detection (craft) and recognition (english) models
-# gpu=False prevents it from looking for CUDA during build
-reader = Reader(['en'], gpu=False, verbose=True)
+# Instantiate to initialize ONNX sessions and load models into memory/cache
+ocr = RapidOCR()
 
-# Verify downloads
-model_dir = os.path.join(os.path.expanduser('~'), '.EasyOCR', 'model')
-if os.path.exists(model_dir):
-    print(f"✅ Models successfully downloaded to {model_dir}:")
-    for f in os.listdir(model_dir):
-        print(f" - {f}")
-else:
-    print("❌ ERROR: Model directory not found after initialization!")
+print("✅ RapidOCR successfully initialized!")

@@ -14,7 +14,7 @@ sequenceDiagram
     participant U as User
     participant F as React Frontend
     participant B as FastAPI Backend
-    participant AI as EasyOCR Engine
+    participant AI as RapidOCR Engine
     
     U->>F: Select & Upload Batch
     F->>B: POST /api/process (Images)
@@ -23,7 +23,7 @@ sequenceDiagram
         B->>B: Preprocess (OpenCV)
         B->>B: Scan Barcode (ZBar)
         alt No Barcode
-            B->>AI: Scan Text (EasyOCR)
+            B->>AI: Scan Text (RapidOCR)
         end
         B->>B: Rename & Organize
     end
@@ -35,6 +35,11 @@ sequenceDiagram
     B-->>F: ZIP Stream
     F->>U: Browser Download
 ```
+
+### Docker & Deployment Architecture
+The repository is structured defensively to isolate the React frontend from the FastAPI backend during CI/CD build processes (e.g., Railway):
+- **Backend Build Context:** The deployment pipeline is instructed to use `Root Directory: /backend`. This ensures that the backend container builds completely isolated from the frontend web assets. Crucially, a dedicated `.dockerignore` file exists *inside* the `backend/` folder so the cloud builder properly filters out local sandbox artifacts and `__pycache__` during this isolated build.
+- **Frontend Build Context:** Deployed natively at the repository root via `Dockerfile.frontend`.
 
 ---
 

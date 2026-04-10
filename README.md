@@ -7,9 +7,12 @@ Saree Organizer is a production-ready tool designed to automate the painful proc
 ---
 
 ## 📖 Project Documentation
-- **[Technical Architecture & HLD](./ARCHITECTURE.md)**: Deep dive into the system design, file structure, and function-level documentation.
-- **[Deployment Guide](#-deployment-railway)**: Steps to go live on Railway.
-- **[Scanning Modes](./ARCHITECTURE.md#-scanning-configuration)**: Understanding OCR vs. Barcode modes.
+
+If you have specific architectural questions, jump straight to the source:
+- **"How do the frontend and backend deploy independently with isolated Docker contexts?"** ➡️ [Read Container Architecture](./ARCHITECTURE.md)
+- **"How do the Barcode and OCR paths differ?"** ➡️ [Read Scanning Strategies](./CODE_FLOW.md#fast-pathslow-path)
+- **"How does the system prevent memory leaks during RapidOCR scanning?"** ➡️ [Read Memory Efficiency Details](./CODE_FLOW.md#memory-efficiency)
+- **"How do I configure scanning modes?"** ➡️ [View Scanning Configuration](./ARCHITECTURE.md#️-scanning-configuration)
 
 ---
 
@@ -17,7 +20,8 @@ Saree Organizer is a production-ready tool designed to automate the painful proc
 
 ### 1. Backend Service
 - **Source**: Link your GitHub repo.
-- **Dockerfile**: Automatically uses `Dockerfile`.
+- **Root Directory**: **MUST** be set to `/backend` in Railway settings (Settings > Service > Root Directory) to ensure correct Docker context and `.dockerignore` targeting.
+- **Dockerfile**: Automatically uses `Dockerfile` (once Root Directory is set).
 - **Primary Settings**: 
   - `ENABLE_BARCODE_SCANNER`: Set to `False` (Default - Recommended for OCR stability).
   - `ALLOWED_ORIGINS`: Set to your frontend URL.
@@ -54,7 +58,7 @@ Saree Organizer is a production-ready tool designed to automate the painful proc
 ---
 
 ## ✨ Features
-- 🧠 **AI-Powered**: Uses EasyOCR with orientation-detection for 99% accuracy on hand-held photos.
+- 🧠 **AI-Powered**: Uses RapidOCR with orientation-detection for 99% accuracy on hand-held photos.
 - ⚡ **Optimized**: Early-exit logic ensures high-speed processing (scans only what is needed).
 - 🔒 **Secure**: Temporary processing sessions with HMAC-signed download links.
 - 📦 **Batch Processing**: Upload hundreds of images; get a clean ZIP back instantly.

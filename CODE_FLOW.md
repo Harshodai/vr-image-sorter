@@ -70,7 +70,7 @@ Following the **SOLID** refactoring, modules are structurally isolated by operat
 ## 3. High-Performance Processing Details
 
 ### A. Memory Efficiency via Threshold Bypassing
-Unlike traditional EasyOCR loops which try 48 different permutations of thresholds and contrasts (ballooning memory allocations), this pipeline acknowledges that **Deep Learning Models process raw RGB arrays better than thresholded logic**. Therefore, Neural Network inference explicitly handles color manipulation natively, drastically dropping Inference cycles from ~45 seconds down to ~14 seconds per batch.
+Unlike traditional OCR loops which try 48 different permutations of thresholds and contrasts (ballooning memory allocations), this pipeline acknowledges that **Deep Learning Models process raw RGB arrays better than thresholded logic**. Therefore, Neural Network inference explicitly handles color manipulation natively, drastically dropping Inference cycles from ~45 seconds down to ~14 seconds per batch.
 
 ### B. Path Traversal Hardening
 When serving zipped artifacts or image previews via `GET /api/download-single/{filename}`, the `routes.py` explicitly normalizes user-provided paths. The requested file path is mathematically run against `base_path.resolve()` absolute anchors. If a malicious client passes `../` constructs, `ValueError` or `startswith` failures immediately throw a 403 HTTP Access Denied error.

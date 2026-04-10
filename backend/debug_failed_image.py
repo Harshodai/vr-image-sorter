@@ -1,42 +1,50 @@
 import os
 import sys
 import io
+import time
 import logging
 import cv2
 
-# Fix unicode characters crashing windows terminals 
+# Fix unicode characters crashing windows terminals
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-# Enable debug logging for main.py
-logging.getLogger("main").setLevel(logging.DEBUG)
+# Route backend modules
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from main import SareeSorter
+from scanner.engine_pool import ocr_pool
+from scanner.pipeline import process_pipeline
+from core.logger import logger
 
-filepath = r"C:\Users\khars\PycharmProjects\vr-image-sorter\tests\sandbox"
+logger.setLevel(logging.DEBUG)
 
-sorter = SareeSorter()
-engine = sorter.get_reader()
+def debug_image(filename: str):
+    filepath = os.path.join(r"C:\Users\khars\PycharmProjects\vr-image-sorter\tests\sandbox", filename)
+    
+    if not os.path.exists(filepath):
+        print(f"Error: Could not find '{filepath}'")
+        return
 
-print(f"Scanning image: {filepath}")
-print("-" * 60)
+    print(f"Scanning image: {filepath}")
+    print("-" * 60)
 
-image = cv2.imread(filepath)
-# Downscale for sanity
-MAX_DIM = 2000
-h, w = image.shape[:2]
-if max(h, w) > MAX_DIM:
-    scale = MAX_DIM / max(h, w)
-    image = cv2.resize(image, (int(w * scale), int(h * scale)))
+    # Initialize pooling to mimic pipeline state
+    ocr_pool.initialize()
 
-for angle in [0, 180]:
-    rot = cv2.rotate(image, cv2.ROTATE_180) if angle == 180 else image
-    for method in ["original", "grayscale", "threshold_otsu"]:
-        proc = sorter.preprocess_image(rot, method)
-        results, _ = engine(proc)
-        if results:
-            print(f"Angle {angle}, Method {method} found {len(results)} text boxes:")
-            for b, t, c in results:
-                print(f"   [{c}] '{t}'")
+    with open(filepath, "rb") as f:
+        image_bytes = f.read()
 
-result = sorter.scan_barcode_from_bytes(open(filepath, "rb").read())
-print(f"\n--> Final Output: {result}")
+    # Track time and execution
+    t_start = time.time()
+    
+    # Process through exact production pipeline (with logging turned up to DEBUG)
+    result = process_pipeline(image_bytes)
+    
+    t_end = time.time()
+    print(f"\n--> Final Output: {result}")
+    print(f"--> Extracted in: {t_end - t_start:.2f}s")
+
+
+if __name__ == "__main__":
+    # You can target any exact failing image here:
+    target_image = "test_user_image.jpg"
+    debug_image(target_image)
