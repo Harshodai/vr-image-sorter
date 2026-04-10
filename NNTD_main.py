@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 import cv2
 import numpy as np
 from pyzbar.pyzbar import decode
-import easyocr
+from rapidocr_onnxruntime import RapidOCR
 import re
 import os
 import tempfile
@@ -188,15 +188,18 @@ def cleanup_session(session_id: str):
             del temp_dirs[session_id]
 
 class SareeSorter:
+    # ── SDLC Optimization: Pre-allocate static kernels once to save memory ──
+    KERNEL_SMALL = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    STRONG_SHARPEN_KERNEL = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+    
     def __init__(self):
-        self.reader = None # Lazy load
+        self.engine = None # Lazy load
 
     def get_reader(self):
-        if self.reader is None:
-            logger.info("Initializing OCR Reader")
-            # verbose=False prevents encoding errors on Windows console
-            self.reader = easyocr.Reader(['en'], verbose=False) 
-        return self.reader
+        if self.engine is None:
+            logger.info("Initializing RapidOCR Engine")
+            self.engine = RapidOCR() 
+        return self.engine
 
     def setup_directories(self):
         # API handles directories in endpoints, but keeping for compatibility if needed
@@ -264,12 +267,12 @@ class SareeSorter:
             mask = np.zeros((h, w), dtype=np.uint8)
             mask[(sat < s_max) & (val > v_min)] = 255
             
-            # Morphological operations to merge nearby white patches (text gaps)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+            # Morphological operations to merge nearby white patches (dynamic kernel size based on resolution)
+            k_size = max(15, min(h, w) // 25)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            # Remove small noise
-            kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
+            # Remove small noise using pre-allocated kernel
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.KERNEL_SMALL)
             
             label_crops = self._extract_label_crops(image, mask, img_area)
             if label_crops:
@@ -289,8 +292,8 @@ class SareeSorter:
         label_crops = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # Label should be between 0.5% and 25% of image area
-            if not (img_area * 0.005 < area < img_area * 0.25):
+            # Label should be between 0.5% and 95% of image area (handles close-up shots)
+            if not (img_area * 0.005 < area < img_area * 0.95):
                 continue
             
             # Get minimum area rotated rectangle
@@ -389,14 +392,12 @@ class SareeSorter:
             scales = [2.0, 3.0, 1.0]
         elif w < 1200:
             scales = [1.5, 1.0]
-        
-        # Methods include new "sharpen_heavy" which works well with Lanczos4 upscaling
-        methods = ["original", "grayscale", "threshold_otsu", "sharpen", "clahe", "sharpen_heavy"]
-        rotations = [0, 180, 90, 270]  # 180 first since labels are often upside-down
-        
-        # Strong sharpening kernel that reconstructs blurry barcode edges
-        strong_sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-        
+
+        # Methods optimized for speed and barcode recovery
+        methods = ["original", "grayscale", "threshold_otsu", "sharpen_heavy"]
+        rotations = [0, 90]  # Pyzbar seamlessly handles 180/270 natively for most symbols
+
+        # Uses the static strong sharpen kernel that reconstructs blurry barcode edges
         for scale in scales:
             if scale != 1.0:
                 # LANCZOS4 is critical for preserving hard edges in barcodes during upscale
@@ -407,7 +408,7 @@ class SareeSorter:
             
             for method in methods:
                 if method == "sharpen_heavy":
-                    processed = cv2.filter2D(scaled, -1, strong_sharpen_kernel)
+                    processed = cv2.filter2D(scaled, -1, self.STRONG_SHARPEN_KERNEL)
                     # Apply Otsu thresholding after heavy sharpening
                     gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
                     _, processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -468,18 +469,18 @@ class SareeSorter:
         Falls back to full image if roi_image fails.
         """
         try:
-            reader = self.get_reader()
+            engine = self.get_reader()
             
             # If we have a label crop, try it first (much faster & more accurate)
             images_to_try = []
             if roi_image is not None:
                 # Upscale small ROI crops for better OCR accuracy
-                roi_upscaled = self._upscale_if_small(roi_image, min_width=600)
+                roi_upscaled = self._upscale_if_small(roi_image, min_width=1200)
                 images_to_try.append(("roi", roi_upscaled))
             images_to_try.append(("full", image))
             
             for source_name, img in images_to_try:
-                result = self._ocr_with_rotations(reader, img)
+                result = self._ocr_with_rotations(engine, img)
                 if result:
                     logger.debug("OCR match found from %s source", source_name)
                     return result
@@ -504,109 +505,71 @@ class SareeSorter:
         clean = re.sub(r"[^A-Z0-9]", "", clean)
         return clean
 
-    def _ocr_with_rotations(self, reader, image):
-        """Try OCR across rotations and preprocessing methods."""
-        rotations = [0, 180, 90, 270]  # 180 prioritized for upside-down labels
-        methods = ["grayscale", "clahe", "threshold_otsu", "original"]
+    def _ocr_with_rotations(self, engine, image):
+        """Try OCR across rotations and preprocessing methods optimized for RapidOCR."""
+        rotations = [0, 180]  # Labels are usually 0 or 180
         best_match = None
         
-        for method in methods:
-            for angle in rotations:
-                if angle == 0:
-                    rotated = image
-                elif angle == 90:
-                    rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-                elif angle == 180:
-                    rotated = cv2.rotate(image, cv2.ROTATE_180)
-                else:
-                    rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # Try multiple rotations
+        for angle in rotations:
+            if angle == 180:
+                rotated = cv2.rotate(image, cv2.ROTATE_180)
+            else:
+                rotated = image
 
-                img_to_scan = self.preprocess_image(rotated, method)
-                
-                results = reader.readtext(img_to_scan)
+            # Strategy: RapidOCR natively standardizes color spaces using DBNet.
+            # Processing via threshold/grayscale actively destroys neural network features.
+            # SDLC Profiling Result: We only need to run on the 'original' array.
+            for method in ["original"]:
+                processed = self.preprocess_image(rotated, method)
 
-                # Strategy 1: Check individual text boxes for VR codes
-                for (bbox, text, prob) in results:
-                    clean = self._clean_ocr_text(text)
-                    if "VR" in clean:
-                        # Try strict match first: VR followed by 2 to 8 digits (prevent matching long MRP/Phone numbers)
-                        match = re.search(r"VR\d{2,8}(?!\d)", clean)
-                        if match and (best_match is None or len(match.group(0)) > len(best_match)):
-                            logger.debug(
-                                "OCR match at angle %d method %s: %s (from box: '%s' -> '%s')",
-                                angle, method, match.group(0), text, clean
-                            )
-                            best_match = match.group(0)
-                        
-                        # Fuzzy match: VR followed by digits with possible letter noise
-                        if not match or len(match.group(0)) < 5:
-                            # Extract everything after "VR" and keep only digits
+                ocr_result, _ = engine(processed)
+                if ocr_result:
+                    # Strategy 1: Check individual lines for standalone VR codes
+                    for _, text, _ in ocr_result:
+                        clean = self._clean_ocr_text(text)
+                        if "VR" in clean:
+                            match = re.search(r"VR\d{4,8}(?!\d)", clean)
+                            if match:
+                                return match.group(0)
+                            
+                            # Fuzzy extract
                             vr_idx = clean.index("VR")
                             after_vr = clean[vr_idx + 2:]
-                            # Collect leading digit-like characters
                             digits = ""
                             for ch in after_vr:
                                 if ch.isdigit():
                                     digits += ch
                                 elif len(digits) >= 3:
-                                    # Stop if we've collected enough digits and hit a letter
                                     break
-                                # Skip isolated letters within digit sequence (OCR noise)
-                            if len(digits) >= 4:
-                                candidate = f"VR{digits}"
-                                if best_match is None or len(candidate) > len(best_match):
-                                    logger.debug(
-                                        "OCR fuzzy match at angle %d method %s: %s (from: '%s')",
-                                        angle, method, candidate, clean
-                                    )
-                                    best_match = candidate
+                            if 4 <= len(digits) <= 8:
+                                return f"VR{digits}"
 
-            # If Strategy 1 found a valid, complete VR code (e.g. at least VR + 4 digits), SKIP Strategy 2 
-            # to prevent concatenating unwanted MRP numbers or phone numbers
-            if best_match and len(best_match) >= 6:
-                return best_match
-                
-            # Strategy 2: Concatenate all text boxes and search
-            # This catches cases where OCR splits "VR221130" into "VR22" + "1130"
-            all_text = "".join(self._clean_ocr_text(t) for _, t, _ in results)
-            if "VR" in all_text:
-                # Strict concat match: limit digits to avoid grabbing MRP
-                concat_match = re.search(r"VR\d{4,8}(?!\d)", all_text)
-                if concat_match and (best_match is None or len(concat_match.group(0)) > len(best_match)):
-                    logger.debug(
-                        "OCR concat match at angle %d method %s: %s (from: '%s')",
-                        angle, method, concat_match.group(0), all_text
-                    )
-                    best_match = concat_match.group(0)
-                
-                # Fuzzy concat: extract digits after VR
-                    vr_idx = all_text.index("VR")
-                    after_vr = all_text[vr_idx + 2:]
-                    digits = ""
-                    for ch in after_vr:
-                        if ch.isdigit():
-                            digits += ch
-                        elif len(digits) >= 3:
-                            break
-                    if len(digits) >= 4:
-                        candidate = f"VR{digits}"
-                        if best_match is None or len(candidate) > len(best_match):
-                            logger.debug(
-                                "OCR fuzzy concat match at angle %d method %s: %s",
-                                angle, method, candidate
-                            )
-                            best_match = candidate
-
-                # If we found a sufficiently long match (5+ digits), return immediately
-                if best_match and len(best_match) >= 7:  # "VR" + 5+ digits
-                    logger.debug("OCR returning high-confidence match: %s", best_match)
-                    return best_match
-
-        # Reject dangerously short partial matches (e.g. "VR22" instead of "VR221130")
-        if best_match and len(best_match) < 6:
-            logger.debug("Rejecting partial VR match '%s' (too short)", best_match)
-            return None
-            
+                    # Strategy 2: Concatenate everything (Fallback if VR code was split across lines)
+                    all_text = " ".join([line[1] for line in ocr_result])
+                    vr = self._clean_ocr_text(all_text)
+                    
+                    if "VR" in vr:
+                        # Strict match
+                        match = re.search(r"VR\d{4,8}(?!\d)", vr)
+                        if match:
+                            candidate = match.group(0)
+                            if best_match is None or len(candidate) > len(best_match):
+                                best_match = candidate
+                                
+                        # Fuzzy match: try to extract digits after VR
+                        if best_match is None:
+                            vr_idx = vr.index("VR")
+                            after_vr = vr[vr_idx + 2:]
+                            digits = ""
+                            for ch in after_vr:
+                                if ch.isdigit():
+                                    digits += ch
+                                elif len(digits) >= 3:
+                                    break
+                            if 4 <= len(digits) <= 8:
+                                best_match = f"VR{digits}"
+        
         return best_match
 
     # ── Main Entry Point (Label-First Architecture) ─────────────────────
@@ -622,6 +585,16 @@ class SareeSorter:
             if original_image is None:
                 logger.warning("Could not decode image bytes")
                 return None
+                
+            # Prevent OOMs from massive images: Downscale if larger than 2000px
+            MAX_DIM = 2000
+            h, w = original_image.shape[:2]
+            if max(h, w) > MAX_DIM:
+                scale = MAX_DIM / max(h, w)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                original_image = cv2.resize(original_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
         except Exception as e:
             logger.error("Image decoding error: %s", type(e).__name__)
             return None
@@ -637,6 +610,7 @@ class SareeSorter:
             result = self.decode_barcode_robust(crop)
             if result:
                 logger.info("Barcode found on label crop %d", i)
+                gc.collect()
                 return result
         
         # ── Step 3: Try OCR on label crops first, then full image ────
@@ -644,6 +618,7 @@ class SareeSorter:
         best_roi = label_crops[0] if label_crops else None
         ocr_result = self.scan_ocr(original_image, roi_image=best_roi)
         if ocr_result:
+            gc.collect()
             return ocr_result
         
         # ── Step 4: If first crop failed OCR, try remaining crops ────
@@ -651,8 +626,10 @@ class SareeSorter:
             for crop in label_crops[1:]:
                 ocr_result = self.scan_ocr(crop)
                 if ocr_result:
+                    gc.collect()
                     return ocr_result
 
+        gc.collect()
         return None
 
     def standardize_filename(self, barcode_data):
@@ -1188,7 +1165,7 @@ async def retry_failed_images(
             img_ext = os.path.splitext(safe_filename)[1].lower()
             
             # Reprocess
-            result = sorter.scan_barcode_from_bytes(contents)
+            result = await scan_in_thread(sorter, contents)
             
             if result:
                 # Success! Move to output
@@ -1261,4 +1238,7 @@ async def retry_failed_images(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    status = "ok"
+    if sorter.engine is None:
+        status = "loading_model"
+    return {"status": status, "model_loaded": sorter.engine is not None}
