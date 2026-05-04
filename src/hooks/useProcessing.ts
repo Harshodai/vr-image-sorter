@@ -117,55 +117,69 @@ export function useProcessing() {
     abortControllerRef.current = new AbortController();
 
     try {
-      const formData = new FormData();
-      images.forEach((img, index) => {
-        formData.append('files', img.file);
-        // Simulate progress
-        setCurrentIndex(index + 1);
-      });
+      const CHUNK_SIZE = 50;
+      let allProcessedFiles: ProcessedFile[] = [];
+      let allFailedFiles: FailedFile[] = [];
+      let finalSessionId: string | undefined = undefined;
 
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/process`, {
-        method: 'POST',
-        body: formData,
-        signal: abortControllerRef.current.signal,
-      });
+      for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+        const chunk = images.slice(i, i + CHUNK_SIZE);
+        const formData = new FormData();
+        chunk.forEach(img => formData.append('files', img.file));
+        if (finalSessionId) {
+          formData.append('session_id', finalSessionId);
+        }
 
-      if (!response.ok) {
-        throw new Error('Processing failed. Please check if the backend is running.');
+        const response = await fetchWithRetry(`${API_BASE_URL}/api/process`, {
+          method: 'POST',
+          body: formData,
+          signal: abortControllerRef.current.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error('Processing failed. Please check if the backend is running.');
+        }
+
+        const data = await response.json();
+        
+        // Store the session token for authenticated requests
+        sessionToken = data.session_token || sessionToken;
+        finalSessionId = data.session_id || finalSessionId;
+
+        // Create authenticated preview URLs
+        const processedFilesChunk: ProcessedFile[] = data.processed.map((item: any) => ({
+          originalName: item.original_name,
+          newName: item.new_name,
+          success: true,
+          preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
+        }));
+
+        const failedFilesChunk: FailedFile[] = data.failed.map((item: any) => ({
+          originalName: item.original_name,
+          preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
+        }));
+        
+        allProcessedFiles = [...allProcessedFiles, ...processedFilesChunk];
+        allFailedFiles = [...allFailedFiles, ...failedFilesChunk];
+
+        // Update progress bar
+        setCurrentIndex(Math.min(i + CHUNK_SIZE, images.length));
       }
-
-      const data = await response.json();
-
-      // Store the session token for authenticated requests
-      sessionToken = data.session_token || null;
-
-      // Create authenticated preview URLs (token will be added when fetching)
-      const processedFiles: ProcessedFile[] = data.processed.map((item: any) => ({
-        originalName: item.original_name,
-        newName: item.new_name,
-        success: true,
-        preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
-      }));
-
-      const failedFiles: FailedFile[] = data.failed.map((item: any) => ({
-        originalName: item.original_name,
-        preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
-      }));
 
       setResult({
         stats: {
           totalFiles: images.length,
-          processedFiles: processedFiles.length,
-          failedFiles: failedFiles.length,
-          successRate: Math.round((processedFiles.length / images.length) * 100),
+          processedFiles: allProcessedFiles.length,
+          failedFiles: allFailedFiles.length,
+          successRate: Math.round((allProcessedFiles.length / images.length) * 100),
         },
-        processedFiles,
-        failedFiles,
-        downloadUrl: data.download_url ? `${API_BASE_URL}${data.download_url}` : undefined,
-        failedDownloadUrl: data.failed_download_url ? `${API_BASE_URL}${data.failed_download_url}` : undefined,
-        hasProcessed: data.has_processed || false,
-        hasFailed: data.has_failed || false,
-        sessionId: data.session_id, // Add session ID to result for retry/single download
+        processedFiles: allProcessedFiles,
+        failedFiles: allFailedFiles,
+        downloadUrl: finalSessionId && allProcessedFiles.length > 0 ? `${API_BASE_URL}/api/download/${finalSessionId}` : undefined,
+        failedDownloadUrl: finalSessionId && allFailedFiles.length > 0 ? `${API_BASE_URL}/api/download-failed/${finalSessionId}` : undefined,
+        hasProcessed: allProcessedFiles.length > 0,
+        hasFailed: allFailedFiles.length > 0,
+        sessionId: finalSessionId, 
       });
 
       setState('results');

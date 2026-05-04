@@ -1,67 +1,57 @@
+from __future__ import annotations
 import cv2
-import numpy as np
+import re
 import logging
-from pyzbar.pyzbar import decode, ZBarSymbol
+import zxingcpp
+# from pyzbar.pyzbar import decode, ZBarSymbol
 from core.config import ENABLE_BARCODE_SCANNER
 
 logger = logging.getLogger("vr-saree-sorter.strategies.barcode")
 
-# Fast static filter constants
-STRONG_SHARPEN_KERNEL = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+
+
+# VR pattern: "VR" followed by digits. Applied to cleaned text.
+VR_PATTERN = re.compile(r"VR\d+", re.IGNORECASE)
+
+def _extract_vr_from_barcode(text: str) -> str | None:
+    """
+    Only accept barcode data that contains a VR code.
+    Pure digit strings (UPC, EAN, etc.) are rejected — they fall through to OCR
+    which has context-aware VR extraction from the printed label text.
+    """
+    clean = text.strip().upper()
+    match = VR_PATTERN.search(clean)
+    if match:
+        return match.group(0)
+    return None
 
 def decode_barcode_robust(image) -> str | None:
-    """Strategy wrapper for PyZbar. Falls back on internal processing rules."""
+    """Strategy wrapper for zxing-cpp. Only returns VR-pattern barcodes."""
     if not ENABLE_BARCODE_SCANNER:
         return None
 
-    symbols = [
-        ZBarSymbol.CODE128, ZBarSymbol.QRCODE,
-        ZBarSymbol.CODE39, ZBarSymbol.EAN13, ZBarSymbol.I25,
-    ]
-    
-    h, w = image.shape[:2]
-    scales = [1.0]
-    if w < 200: scales = [5.0, 4.0, 3.0]
-    elif w < 400: scales = [3.0, 2.0]
-    elif w < 800: scales = [2.0, 3.0, 1.0]
-    elif w < 1200: scales = [1.5, 1.0]
-
-    methods = ["original", "grayscale", "threshold_otsu", "sharpen_heavy"]
-    rotations = [0, 90]
-
-    for scale in scales:
-        if scale != 1.0:
-            scaled = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+    try:
+        # Convert to grayscale: 3x less memory, better contrast for barcode reading
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
-            scaled = image
+            gray = image
         
-        for method in methods:
-            if method == "sharpen_heavy":
-                processed = cv2.filter2D(scaled, -1, STRONG_SHARPEN_KERNEL)
-                gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-                _, processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            elif method == "grayscale":
-                processed = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY) if len(scaled.shape) == 3 else scaled
-            elif method == "threshold_otsu":
-                gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY) if len(scaled.shape) == 3 else scaled
-                _, processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            else:
-                processed = scaled
-            
-            for angle in rotations:
-                if angle == 0: img_to_scan = processed
-                elif angle == 90: img_to_scan = cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)
-                elif angle == 180: img_to_scan = cv2.rotate(processed, cv2.ROTATE_180)
-                else: img_to_scan = cv2.rotate(processed, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                
-                try:
-                    barcodes = decode(img_to_scan, symbols=symbols)
-                    for barcode in barcodes:
-                        data = barcode.data.decode("utf-8")
-                        if data:
-                            logger.debug("Barcode found: scale=%.1f method=%s angle=%d", scale, method, angle)
-                            return data
-                except Exception as e:
-                    logger.debug("Barcode scan error: %s", str(e))
-    
+        # Restrict to Code128 + QRCode only — the only formats on saree labels
+        # This prevents reading UPC/EAN product barcodes and is faster
+        vr_formats = zxingcpp.BarcodeFormat.Code128 | zxingcpp.BarcodeFormat.QRCode
+        results = zxingcpp.read_barcodes(gray, formats=vr_formats)
+        for result in results:
+            if result.text:
+                vr_code = _extract_vr_from_barcode(result.text)
+                if vr_code:
+                    logger.debug(f"zxing-cpp VR barcode found: {vr_code} (raw: {result.text})")
+                    return vr_code
+                else:
+                    logger.debug(f"zxing-cpp rejected non-VR barcode: {result.text}")
+    except Exception as e:
+        logger.debug("zxing-cpp error: %s", str(e))
+
+    # Legacy pyzbar implementation removed — see git history
     return None
+

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import cv2
 import re
 import logging
@@ -8,6 +9,8 @@ logger = logging.getLogger("vr-saree-sorter.strategies.ocr")
 def _clean_ocr_text(text: str) -> str:
     """Aggressively clean OCR text for VR code extraction."""
     clean = text.replace(" ", "").upper()
+    # Common OCR misreads: '/' or '\\' read instead of 'V' before 'R'
+    clean = re.sub(r"[/\\]R(\d)", r"VR\1", clean)
     ocr_digit_map = str.maketrans("OoIl|", "00111")
     clean = clean.translate(ocr_digit_map)
     clean = re.sub(r"[^A-Z0-9]", "", clean)
@@ -30,30 +33,19 @@ def _ocr_with_rotations(engine, image) -> str | None:
             # Strategy 1: Check individual lines
             for _, text, _ in ocr_result:
                 clean = _clean_ocr_text(text)
-                if "VR" in clean:
-                    match = re.search(r"VR\d{4,8}(?!\d)", clean)
-                    if match: return match.group(0)
-                    
-                    vr_idx = clean.index("VR")
-                    digits = "".join(filter(str.isdigit, clean[vr_idx+2:][:8]))
-                    if 4 <= len(digits):
-                        return f"VR{digits}"
+                # Use strict regex: VR immediately followed by digits (not VRP, VRS, etc.)
+                match = re.search(r"VR\d{4,8}(?!\d)", clean)
+                if match:
+                    return match.group(0)
 
             # Strategy 2: Concatenate everything fallback
             all_text = " ".join([line[1] for line in ocr_result])
             vr = _clean_ocr_text(all_text)
-            if "VR" in vr:
-                match = re.search(r"VR\d{4,8}(?!\d)", vr)
-                if match:
-                    candidate = match.group(0)
-                    if best_match is None or len(candidate) > len(best_match):
-                        best_match = candidate
-                        
-                if best_match is None:
-                    vr_idx = vr.index("VR")
-                    digits = "".join(filter(str.isdigit, vr[vr_idx+2:][:8]))
-                    if 4 <= len(digits):
-                        best_match = f"VR{digits}"
+            match = re.search(r"VR\d{4,8}(?!\d)", vr)
+            if match:
+                candidate = match.group(0)
+                if best_match is None or len(candidate) > len(best_match):
+                    best_match = candidate
     
     return best_match
 

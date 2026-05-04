@@ -1,18 +1,19 @@
+from __future__ import annotations
 import os
 import io
 import time
 import uuid
 import zipfile
 import hashlib
-import gc
 import tempfile
 import asyncio
+import concurrent.futures
 import logging
 from typing import List, Optional
 from pathlib import Path
 from PIL import Image
 
-from fastapi import APIRouter, File, UploadFile, HTTPException, Header, BackgroundTasks, Request
+from fastapi import APIRouter, File, UploadFile, HTTPException, Header, BackgroundTasks, Request, Form
 from fastapi.responses import FileResponse, JSONResponse
 
 from core.config import (
@@ -31,23 +32,35 @@ logger = logging.getLogger("vr-saree-sorter.api")
 router = APIRouter()
 
 semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
+# Bounded thread pool prevents thread explosion under high concurrency
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_CONCURRENCY)
 
 def cleanup_session(session_id: str):
-    if session_id in temp_dirs:
+    session = temp_dirs.pop(session_id, None)
+    if session:
         try:
             import shutil
-            shutil.rmtree(temp_dirs[session_id]["path"], ignore_errors=True)
+            shutil.rmtree(session["path"], ignore_errors=True)
             logger.info("Cleaned up session %s", session_id)
         except Exception as e:
             logger.error("Error cleaning up session %s: %s", session_id, e)
-        del temp_dirs[session_id]
 
 async def scan_in_thread(contents: bytes) -> str | None:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, process_pipeline, contents)
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_executor, process_pipeline, contents),
+            timeout=60.0  # 60s per image — generous for OCR fallback
+        )
+    except asyncio.TimeoutError:
+        logger.error("Image processing timed out after 60s")
+        return None
 
 @router.post("/api/process")
-async def process_images(files: List[UploadFile] = File(...)):
+async def process_images(
+    files: List[UploadFile] = File(...),
+    session_id: Optional[str] = Form(None)
+):
     if len(files) > MAX_BATCH_SIZE:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_BATCH_SIZE} files allowed per request")
     if len(files) == 0:
@@ -72,23 +85,32 @@ async def process_images(files: List[UploadFile] = File(...)):
         
         try:
             image = Image.open(io.BytesIO(contents))
-            image.verify()
-            image = Image.open(io.BytesIO(contents))
-            if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
-                raise HTTPException(status_code=400, detail=f"Image dimensions exceed limit")
+            width, height = image.size  # Read dimensions before verify
+            image.verify()  # Validates integrity, invalidates object
+            if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+                raise HTTPException(status_code=400, detail="Image dimensions exceed limit")
         except HTTPException:
             raise
         except Exception:
-            raise HTTPException(status_code=400, detail=f"Invalid or corrupted image")
+            raise HTTPException(status_code=400, detail="Invalid or corrupted image")
         
         validated_files.append({"filename": file.filename, "contents": contents, "ext": ext})
     
-    session_id = str(uuid.uuid4())
-    temp_dir = tempfile.mkdtemp()
-    output_dir = os.path.join(temp_dir, "output")
-    failed_dir = os.path.join(temp_dir, "failed")
-    os.makedirs(output_dir)
-    os.makedirs(failed_dir)
+    is_new_session = False
+    if session_id and session_id in temp_dirs:
+        # Append to existing session
+        temp_dir = temp_dirs[session_id]["path"]
+        output_dir = os.path.join(temp_dir, "output")
+        failed_dir = os.path.join(temp_dir, "failed")
+        session_token = "existing_token" # We reuse the existing token hash logic later if needed
+    else:
+        is_new_session = True
+        session_id = str(uuid.uuid4())
+        temp_dir = tempfile.mkdtemp()
+        output_dir = os.path.join(temp_dir, "output")
+        failed_dir = os.path.join(temp_dir, "failed")
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(failed_dir, exist_ok=True)
     
     processed = []
     failed = []
@@ -96,6 +118,7 @@ async def process_images(files: List[UploadFile] = File(...)):
     batch_size = len(validated_files)
     logger.info("Batch processing started: %d file(s), concurrency limit=%d", batch_size, BATCH_CONCURRENCY)
     batch_start = time.monotonic()
+
 
     async def _process_one(file_data):
         contents = file_data["contents"]
@@ -109,7 +132,6 @@ async def process_images(files: List[UploadFile] = File(...)):
                 result = await scan_in_thread(contents)
                 elapsed = time.monotonic() - file_start
                 logger.info("File scanned in %.2fs: %s", elapsed, safe_filename)
-                gc.collect()
             
             if result:
                 from scanner.utils import standardize_filename
@@ -172,25 +194,20 @@ async def process_images(files: List[UploadFile] = File(...)):
         if status == "processed": processed.append(item)
         else: failed.append(item)
     
-    zip_path = os.path.join(temp_dir, "output.zip")
-    output_files = os.listdir(output_dir)
-    if output_files:
-        with zipfile.ZipFile(zip_path, 'w') as zf:
-            for f in output_files: zf.write(os.path.join(output_dir, f), f)
+    # Removed eager zip generation here to prevent quadratic scaling on chunked uploads.
+    # ZIPs will be generated dynamically upon download request.
     
-    failed_zip_path = os.path.join(temp_dir, "failed.zip")
-    failed_files_list = os.listdir(failed_dir)
-    if failed_files_list:
-        with zipfile.ZipFile(failed_zip_path, 'w') as zf:
-            for f in failed_files_list: zf.write(os.path.join(failed_dir, f), f)
-    
-    session_token = generate_session_token()
-    token_hash = hashlib.sha256(session_token.encode()).hexdigest()
-    
-    temp_dirs[session_id] = {
-        "path": temp_dir, "created_at": time.time(),
-        "token_hash": token_hash, "download_count": 0, "access_count": 0
-    }
+    # Only create a new session entry for brand new sessions
+    if is_new_session:
+        session_token = generate_session_token()
+        token_hash = hashlib.sha256(session_token.encode()).hexdigest()
+        temp_dirs[session_id] = {
+            "path": temp_dir, "created_at": time.time(),
+            "token_hash": token_hash, "download_count": 0, "access_count": 0
+        }
+    else:
+        # Reuse the existing token so the frontend's Authorization header stays valid
+        session_token = None  # Frontend already has it from chunk 1
     
     current_time = time.time()
     expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > 3600]
@@ -204,8 +221,8 @@ async def process_images(files: List[UploadFile] = File(...)):
         "has_processed": len(processed) > 0,
         "has_failed": len(failed) > 0,
     }
-    if output_files: response_data["download_url"] = f"/api/download/{session_id}"
-    if failed_files_list: response_data["failed_download_url"] = f"/api/download-failed/{session_id}"
+    if os.listdir(output_dir): response_data["download_url"] = f"/api/download/{session_id}"
+    if os.listdir(failed_dir): response_data["failed_download_url"] = f"/api/download-failed/{session_id}"
     
     return response_data
 
@@ -224,7 +241,16 @@ async def download_zip(session_id: str, background_tasks: BackgroundTasks, autho
         if not str(zip_path).startswith(str(base_path.resolve())): raise HTTPException(status_code=403, detail="Access denied")
     except Exception: raise HTTPException(status_code=400, detail="Invalid path")
     
-    if not zip_path.exists(): raise HTTPException(status_code=404, detail="Zip file not found")
+    if not zip_path.exists():
+        # Generate zip dynamically
+        output_dir = base_path / "output"
+        if not output_dir.exists() or not any(output_dir.iterdir()):
+            raise HTTPException(status_code=404, detail="No files to zip")
+            
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            for f in output_dir.iterdir():
+                zf.write(str(f), f.name)
+                
     return FileResponse(str(zip_path), filename="saree_organized.zip", media_type="application/zip")
 
 @router.get("/api/download-failed/{session_id}")
@@ -242,7 +268,16 @@ async def download_failed_zip(session_id: str, background_tasks: BackgroundTasks
         if not str(zip_path).startswith(str(base_path.resolve())): raise HTTPException(status_code=403, detail="Access denied")
     except Exception: raise HTTPException(status_code=400, detail="Invalid path")
     
-    if not zip_path.exists(): raise HTTPException(status_code=404, detail="Failed images zip not found")
+    if not zip_path.exists():
+        # Generate failed zip dynamically
+        failed_dir = base_path / "failed"
+        if not failed_dir.exists() or not any(failed_dir.iterdir()):
+            raise HTTPException(status_code=404, detail="No failed files to zip")
+            
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            for f in failed_dir.iterdir():
+                zf.write(str(f), f.name)
+                
     return FileResponse(str(zip_path), filename="failed_images.zip", media_type="application/zip")
 
 @router.get("/api/preview/{session_id}/{filename}")
@@ -360,19 +395,8 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
             logger.error("Error retrying file %s: %s", filename, e)
 
     if retried_processed:
-        zip_path = os.path.join(temp_dir, "output.zip")
-        output_files = os.listdir(output_dir)
-        if output_files:
-            with zipfile.ZipFile(zip_path, 'w') as zf:
-                for f in output_files: zf.write(os.path.join(output_dir, f), f)
-        
-        failed_zip_path = os.path.join(temp_dir, "failed.zip")
-        failed_files_list = os.listdir(failed_dir)
-        if failed_files_list:
-            with zipfile.ZipFile(failed_zip_path, 'w') as zf:
-                for f in failed_files_list: zf.write(os.path.join(failed_dir, f), f)
-        else:
-            if os.path.exists(failed_zip_path): os.remove(failed_zip_path)
+        # Dynamic zip generation has been delegated to the download endpoints
+        pass
 
     return {
         "success": True,

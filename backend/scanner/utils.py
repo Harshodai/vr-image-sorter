@@ -107,9 +107,11 @@ def detect_label_regions(image):
     return []
 
 def standardize_filename(barcode_data):
-    """Standardize output VRCode formats"""
-    clean_data = barcode_data.strip()
-    if not clean_data.upper().startswith("VR"):
-        if clean_data.isdigit():
-                return f"VR{clean_data}"
-    return clean_data.upper()
+    """Standardize output VRCode formats.
+    The extraction pipeline (barcode.py + ocr.py) already ensures results
+    contain 'VR'. This function normalizes casing and whitespace only.
+    """
+    clean_data = barcode_data.strip().upper()
+    # Remove any non-alphanumeric characters
+    clean_data = ''.join(c for c in clean_data if c.isalnum())
+    return clean_data

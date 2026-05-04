@@ -3,7 +3,6 @@ FROM python:3.12-slim
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
-    libzbar0 \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -17,6 +16,8 @@ WORKDIR /app
 # With 4 workers, this keeps total threads well within Railway's limits.
 ENV OMP_NUM_THREADS=2
 ENV MKL_NUM_THREADS=2
+# inter_op_num_threads=1: Optimal for sequential single-image inference (no graph parallelism)
+ENV ORT_INTER_OP_NUM_THREADS=1
 ENV OCR_POOL_SIZE=1
 
 # Pre-install robust NumPy version to prevent 2.x conflicts

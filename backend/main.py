@@ -10,10 +10,7 @@ from scanner.engine_pool import ocr_pool
 # Initialize FastAPI App
 app = FastAPI(title="VR Saree Sorter Backend API", version="2.0.0")
 
-# Pre-warm Scanner Object Pool on startup to prevent boot lag
-@app.on_event("startup")
-async def startup_event():
-    ocr_pool.initialize()
+# Initialize pool lazily (startup event removed to save memory)
 
 # Unified Exception Handler
 @app.exception_handler(Exception)

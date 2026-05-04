@@ -2,7 +2,8 @@ fastapi>=0.115.0,<0.116.0
 uvicorn[standard]>=0.32.0,<0.33.0
 python-multipart>=0.0.16,<0.1.0
 opencv-python-headless>=4.10.0,<4.11.0
-pyzbar>=0.1.9,<0.2.0
+# pyzbar>=0.1.9,<0.2.0  # Legacy scanner - replaced by zxing-cpp
+zxing-cpp>=2.2.0,<3.0.0
 rapidocr-onnxruntime>=1.2.0,<2.0.0
 numpy<2.0.0
 pillow>=10.0.0,<11.0.0
