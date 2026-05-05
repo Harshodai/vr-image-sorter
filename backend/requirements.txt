@@ -7,3 +7,4 @@ zxing-cpp>=2.2.0,<3.0.0
 rapidocr-onnxruntime>=1.2.0,<2.0.0
 numpy<2.0.0
 pillow>=10.0.0,<11.0.0
+psutil>=5.9.0,<7.0.0
