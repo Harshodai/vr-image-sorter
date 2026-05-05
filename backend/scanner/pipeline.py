@@ -1,67 +1,117 @@
 from __future__ import annotations
+
+import logging
+import time
+
 import cv2
 import numpy as np
-import logging
+
 from scanner.utils import detect_label_regions
 from scanner.strategies.barcode import decode_barcode_robust
 from scanner.strategies.ocr import scan_ocr
 
 logger = logging.getLogger("vr-saree-sorter.pipeline")
 
-def process_pipeline(image_bytes: bytes) -> str | None:
+# Maximum dimension (px) before downscaling to prevent OOM on large images.
+_MAX_DIM = 1200
+
+
+def _decode_image(image_bytes: bytes):
     """
-    Attempts to scan a barcode/VR code from image bytes utilizing
-    the SOLID Pipeline Pattern.
+    Decode raw bytes into an OpenCV BGR image, downscaling if necessary.
+    Returns the image array or None on failure.
     """
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
-        original_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if original_image is None:
-            logger.warning("Could not decode image bytes")
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is None:
+            logger.warning("cv2.imdecode returned None — unsupported or corrupt image")
             return None
-            
-        # Prevent OOMs from massive images: Downscale if larger than 1200px
-        MAX_DIM = 1200
-        h, w = original_image.shape[:2]
-        if max(h, w) > MAX_DIM:
-            scale = MAX_DIM / max(h, w)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            original_image = cv2.resize(original_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            
-    except Exception as e:
-        logger.error("Image decoding error: %s", type(e).__name__)
+
+        h, w = image.shape[:2]
+        if max(h, w) > _MAX_DIM:
+            scale = _MAX_DIM / max(h, w)
+            image = cv2.resize(
+                image,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+            logger.debug("Downscaled image from %dx%d to %dx%d", w, h, int(w * scale), int(h * scale))
+
+        return image
+    except Exception as exc:
+        logger.error("Image decoding error: %s", type(exc).__name__)
         return None
 
-    # Step 1: Detect label regions
-    label_crops = detect_label_regions(original_image)
-    logger.debug("Detected %d label regions", len(label_crops))
-    
-    # Step 2: Try barcode on label crops first
+
+def process_pipeline(image_bytes: bytes) -> str | None:
+    """
+    Attempt to extract a VR code from *image_bytes* using the SOLID Pipeline
+    Pattern:
+
+      1. Detect white label regions (ROI extraction).
+      2. Barcode scan on each label crop (fast path).
+      3. Barcode scan on the full image (fallback).
+      4. OCR on the best label crop + full image (deep fallback).
+      5. OCR on remaining label crops (exhaustive fallback).
+
+    Each step is wrapped in its own try/except so a failure in one strategy
+    never prevents the next from running.
+    """
+    t0 = time.monotonic()
+
+    original_image = _decode_image(image_bytes)
+    if original_image is None:
+        return None
+
+    # ── Step 1: Detect label regions ────────────────────────────────────
+    try:
+        label_crops = detect_label_regions(original_image)
+        logger.debug("Detected %d label region(s)", len(label_crops))
+    except Exception as exc:
+        logger.error("Label detection error: %s", type(exc).__name__, exc_info=True)
+        label_crops = []
+
+    # ── Step 2: Barcode on label crops ──────────────────────────────────
     for i, crop in enumerate(label_crops):
-        result = decode_barcode_robust(crop)
-        if result:
-            logger.info("Barcode found on label crop %d", i)
-            return result
-    
-    # Step 3: Try barcode on full image (VR-pattern filter rejects UPC/EAN automatically)
-    full_barcode = decode_barcode_robust(original_image)
-    if full_barcode:
-        logger.info("Barcode found on full image scan")
-        return full_barcode
-    
-    # Step 4: Try RapidOCR Deep Learning Strategy on label crops then full image
+        try:
+            result = decode_barcode_robust(crop)
+            if result:
+                logger.info("Barcode found on label crop %d (%.2fs)", i, time.monotonic() - t0)
+                return result
+        except Exception as exc:
+            logger.debug("Barcode error on crop %d: %s", i, type(exc).__name__)
+
+    # ── Step 3: Barcode on full image ───────────────────────────────────
+    try:
+        full_barcode = decode_barcode_robust(original_image)
+        if full_barcode:
+            logger.info("Barcode found on full image (%.2fs)", time.monotonic() - t0)
+            return full_barcode
+    except Exception as exc:
+        logger.debug("Barcode error on full image: %s", type(exc).__name__)
+
+    # ── Step 4: OCR on best label crop + full image ──────────────────────
     logger.debug("Attempting OCR fallback")
     best_roi = label_crops[0] if label_crops else None
-    ocr_result = scan_ocr(original_image, roi_image=best_roi)
-    if ocr_result:
-        return ocr_result
-    
-    # Step 5: Full fallback — OCR on remaining label crops
-    if len(label_crops) > 1:
-        for crop in label_crops[1:]:
-            ocr_result = scan_ocr(crop)
-            if ocr_result:
-                return ocr_result
+    try:
+        ocr_result = scan_ocr(original_image, roi_image=best_roi)
+        if ocr_result:
+            logger.info("OCR match on primary pass (%.2fs)", time.monotonic() - t0)
+            return ocr_result
+    except Exception as exc:
+        logger.error("OCR primary pass error: %s", type(exc).__name__, exc_info=True)
 
+    # ── Step 5: OCR on remaining label crops ────────────────────────────
+    if len(label_crops) > 1:
+        for j, crop in enumerate(label_crops[1:], start=1):
+            try:
+                ocr_result = scan_ocr(crop)
+                if ocr_result:
+                    logger.info("OCR match on label crop %d (%.2fs)", j, time.monotonic() - t0)
+                    return ocr_result
+            except Exception as exc:
+                logger.debug("OCR error on crop %d: %s", j, type(exc).__name__)
+
+    logger.debug("Pipeline exhausted — no VR code found (%.2fs)", time.monotonic() - t0)
     return None
