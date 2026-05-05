@@ -17,13 +17,15 @@ from fastapi import APIRouter, File, UploadFile, HTTPException, Header, Backgrou
 from fastapi.responses import FileResponse, JSONResponse
 
 from core.config import (
-    MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE, 
-    MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION
+    MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
+    MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION,
+    WORKER_TIMEOUT,
 )
 from core.security import (
-    validate_filename, validate_session_id, validate_session_token, 
-    generate_session_token, temp_dirs
+    validate_filename, validate_session_id, validate_session_token,
+    generate_session_token, temp_dirs, session_manager,
 )
+from core.logger import new_correlation_id
 from scanner.pipeline import process_pipeline
 from scanner.engine_pool import ocr_pool
 from api.models import RetryRequest
@@ -35,54 +37,70 @@ semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
 # Bounded thread pool prevents thread explosion under high concurrency
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_CONCURRENCY)
 
-def cleanup_session(session_id: str):
-    session = temp_dirs.pop(session_id, None)
-    if session:
-        try:
-            import shutil
-            shutil.rmtree(session["path"], ignore_errors=True)
-            logger.info("Cleaned up session %s", session_id)
-        except Exception as e:
-            logger.error("Error cleaning up session %s: %s", session_id, e)
+
+def cleanup_session(session_id: str) -> None:
+    """Delete a session's temp files via the SessionManager."""
+    session_manager.delete(session_id)
+
 
 async def scan_in_thread(contents: bytes) -> str | None:
+    """Run the CPU-bound pipeline in the thread pool with a per-image timeout."""
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
             loop.run_in_executor(_executor, process_pipeline, contents),
-            timeout=60.0  # 60s per image — generous for OCR fallback
+            timeout=float(WORKER_TIMEOUT),
         )
     except asyncio.TimeoutError:
-        logger.error("Image processing timed out after 60s")
+        logger.error("Image processing timed out after %ds", WORKER_TIMEOUT)
         return None
 
 @router.post("/api/process")
 async def process_images(
     files: List[UploadFile] = File(...),
-    session_id: Optional[str] = Form(None)
+    session_id: Optional[str] = Form(None),
 ):
-    if len(files) > MAX_BATCH_SIZE:
-        raise HTTPException(status_code=400, detail=f"Maximum {MAX_BATCH_SIZE} files allowed per request")
+    # Assign a correlation ID for end-to-end tracing of this request
+    cid = new_correlation_id()
+
     if len(files) == 0:
         raise HTTPException(status_code=400, detail="No files provided")
-    
+    if len(files) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Maximum {MAX_BATCH_SIZE} files allowed per request. "
+                f"You submitted {len(files)}. "
+                "Split your upload into smaller batches or increase MAX_BATCH_SIZE."
+            ),
+        )
+
     validated_files = []
     total_size = 0
-    
+
     for file in files:
         ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
         if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"Invalid file type for '{file.filename}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
-        
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type for '{file.filename}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+            )
+
         contents = await file.read()
         file_size = len(contents)
         if file_size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail=f"File exceeds maximum size")
-        
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{file.filename}' exceeds the {MAX_FILE_SIZE // (1024*1024)}MB per-file limit",
+            )
+
         total_size += file_size
         if total_size > MAX_TOTAL_SIZE:
-            raise HTTPException(status_code=400, detail=f"Total upload size exceeds limit")
-        
+            raise HTTPException(
+                status_code=400,
+                detail=f"Total upload size exceeds the {MAX_TOTAL_SIZE // (1024*1024)}MB batch limit",
+            )
+
         try:
             image = Image.open(io.BytesIO(contents))
             width, height = image.size  # Read dimensions before verify
@@ -92,17 +110,17 @@ async def process_images(
         except HTTPException:
             raise
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid or corrupted image")
-        
+            raise HTTPException(status_code=400, detail=f"Invalid or corrupted image: '{file.filename}'")
+
         validated_files.append({"filename": file.filename, "contents": contents, "ext": ext})
-    
+
     is_new_session = False
-    if session_id and session_id in temp_dirs:
+    if session_id and session_id in session_manager:
         # Append to existing session
-        temp_dir = temp_dirs[session_id]["path"]
+        temp_dir = session_manager[session_id]["path"]
         output_dir = os.path.join(temp_dir, "output")
         failed_dir = os.path.join(temp_dir, "failed")
-        session_token = "existing_token" # We reuse the existing token hash logic later if needed
+        session_token = "existing_token"  # Frontend already holds the token from chunk 1
     else:
         is_new_session = True
         session_id = str(uuid.uuid4())
@@ -111,12 +129,15 @@ async def process_images(
         failed_dir = os.path.join(temp_dir, "failed")
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(failed_dir, exist_ok=True)
-    
+
     processed = []
     failed = []
-    
+
     batch_size = len(validated_files)
-    logger.info("Batch processing started: %d file(s), concurrency limit=%d", batch_size, BATCH_CONCURRENCY)
+    logger.info(
+        "Batch started: cid=%s files=%d concurrency=%d session=%s",
+        cid, batch_size, BATCH_CONCURRENCY, session_id,
+    )
     batch_start = time.monotonic()
 
 
@@ -188,30 +209,32 @@ async def process_images(
     results = await asyncio.gather(*tasks)
 
     batch_elapsed = time.monotonic() - batch_start
-    logger.info("Batch processing complete: %d file(s) in %.2fs", batch_size, batch_elapsed)
+    logger.info(
+        "Batch complete: cid=%s files=%d processed=%d failed=%d elapsed=%.2fs",
+        cid, batch_size, sum(1 for s, _ in results if s == "processed"),
+        sum(1 for s, _ in results if s == "failed"), batch_elapsed,
+    )
 
     for status, item in results:
-        if status == "processed": processed.append(item)
-        else: failed.append(item)
-    
+        if status == "processed":
+            processed.append(item)
+        else:
+            failed.append(item)
+
     # Removed eager zip generation here to prevent quadratic scaling on chunked uploads.
     # ZIPs will be generated dynamically upon download request.
-    
+
     # Only create a new session entry for brand new sessions
     if is_new_session:
         session_token = generate_session_token()
         token_hash = hashlib.sha256(session_token.encode()).hexdigest()
-        temp_dirs[session_id] = {
-            "path": temp_dir, "created_at": time.time(),
-            "token_hash": token_hash, "download_count": 0, "access_count": 0
-        }
+        session_manager.create(session_id, temp_dir, token_hash)
     else:
         # Reuse the existing token so the frontend's Authorization header stays valid
         session_token = None  # Frontend already has it from chunk 1
-    
-    current_time = time.time()
-    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > 3600]
-    for sid in expired: cleanup_session(sid)
+
+    # Periodic TTL-based cleanup (delegated to SessionManager)
+    session_manager.cleanup_expired_sessions()
     
     response_data = {
         "session_id": session_id,
@@ -410,4 +433,19 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": ocr_pool._initialized}
+    """Health check endpoint — returns pool metrics, session stats, and resource health."""
+    from core.monitoring import check_resource_health, get_memory_usage, get_cpu_usage
+    from core.security import session_manager
+
+    mem_pct, mem_gb = get_memory_usage()
+    resource_health = check_resource_health()
+
+    return {
+        "status": "ok" if resource_health != "critical" else "degraded",
+        "resource_health": resource_health,
+        "memory_percent": mem_pct,
+        "memory_gb": mem_gb,
+        "cpu_percent": get_cpu_usage(),
+        "ocr_pool": ocr_pool.health_check(),
+        "sessions": session_manager.metrics(),
+    }
