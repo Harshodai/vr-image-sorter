@@ -9,10 +9,10 @@ PYBIN := $(VENV)/bin/python
 # uv installs the Python deps in seconds instead of minutes. Fall back to pip.
 UV := $(shell command -v uv 2>/dev/null)
 ifdef UV
-  MKVENV  = uv venv $(VENV) --python $(PY)
+  MKVENV  = uv venv $(VENV) --python $(PY) --allow-existing
   INSTALL = VIRTUAL_ENV=$(VENV) uv pip install -r backend/requirements.txt
 else
-  MKVENV  = $(PY) -m venv $(VENV)
+  MKVENV  = test -x $(PYBIN) || $(PY) -m venv $(VENV)
   INSTALL = $(VENV)/bin/pip install --upgrade pip && $(VENV)/bin/pip install -r backend/requirements.txt
 endif
 

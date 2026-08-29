@@ -28,12 +28,12 @@ function Setup-Backend {
     # uv is 10-100x faster than pip. Use it when present, otherwise fall back.
     if (Have 'uv') {
         Write-Host '==> uv detected: fast install' -ForegroundColor Cyan
-        & uv venv $Venv --python $py
+        & uv venv $Venv --python $py --allow-existing
         $env:VIRTUAL_ENV = $Venv
         & uv pip install -r (Join-Path $Root 'backend\requirements.txt')
     } else {
         Write-Host '==> uv not found, using pip (slower). Install uv: winget install astral-sh.uv' -ForegroundColor Yellow
-        & $py -m venv $Venv
+        if (-not (Test-Path $VPy)) { & $py -m venv $Venv }
         & $VPy -m pip install --upgrade pip
         & $VPy -m pip install -r (Join-Path $Root 'backend\requirements.txt')
     }

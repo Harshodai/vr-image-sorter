@@ -89,13 +89,13 @@ function cmdSetup() {
   const py = requirePython();
   console.log(c.bold('\n1/3  Python environment'));
   if (which('uv')) {
-    if (run('uv', ['venv', VENV, '--python', py])) return 1;
+    if (run('uv', ['venv', VENV, '--python', py, '--allow-existing'])) return 1;
     if (run('uv', ['pip', 'install', '-r', join(ROOT, 'backend', 'requirements.txt')],
             { env: { ...process.env, VIRTUAL_ENV: VENV } })) return 1;
   } else {
     console.log(c.yellow('  uv not found — using pip. Install uv for much faster setup:'));
     console.log(c.dim(IS_WIN ? '    winget install astral-sh.uv' : '    brew install uv'));
-    if (run(py, ['-m', 'venv', VENV])) return 1;
+    if (!existsSync(VENV_PY) && run(py, ['-m', 'venv', VENV])) return 1;
     if (run(VENV_PY, ['-m', 'pip', 'install', '--upgrade', 'pip'])) return 1;
     if (run(VENV_PY, ['-m', 'pip', 'install', '-r', join(ROOT, 'backend', 'requirements.txt')])) return 1;
   }
