@@ -2,7 +2,7 @@ import queue
 import logging
 import os
 from rapidocr_onnxruntime import RapidOCR
-from core.config import OCR_POOL_SIZE
+from core.config import OCR_POOL_SIZE, OCR_THREADS_PER_ENGINE
 
 logger = logging.getLogger("vr-saree-sorter.pool")
 
@@ -34,7 +34,17 @@ class RapidsEnginePool:
             # det_limit_side_len=960: Higher detection resolution for small label text
             # text_score=0.4: Lower threshold catches more candidates (VR filter handles precision)
             # Benchmark-verified: 36% faster than defaults, same 100% accuracy
-            engine = RapidOCR(det_limit_side_len=960, text_score=0.4)
+            # intra/inter_op_num_threads: ONNX Runtime defaults to -1 (= every core),
+            # so a single process saturates the CPU and extra workers only contend —
+            # measured 1.06 img/s at 1, 4 and 8 workers alike. Pinning each engine to
+            # one thread lets process-level parallelism actually scale (2.03 img/s at
+            # 10 workers on a 10-core host).
+            engine = RapidOCR(
+                det_limit_side_len=960,
+                text_score=0.4,
+                intra_op_num_threads=OCR_THREADS_PER_ENGINE,
+                inter_op_num_threads=OCR_THREADS_PER_ENGINE,
+            )
         return engine
 
     def release(self, engine: RapidOCR):

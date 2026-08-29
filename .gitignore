@@ -33,3 +33,5 @@ __pycache__/
 temp_logs/
 temp_logs/
 .agent/
+# Serena MCP project state
+.serena/

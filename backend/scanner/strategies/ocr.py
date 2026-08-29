@@ -18,12 +18,18 @@ def _clean_ocr_text(text: str) -> str:
 
 def _ocr_with_rotations(engine, image) -> str | None:
     """Run DBNet across rotational passes"""
-    rotations = [0, 180]
+    # 90/270 are required: sideways labels are common on hand-held photos and
+    # DBNet will not recover them from an upright pass.
+    rotations = [0, 180, 90, 270]
     best_match = None
-    
+
     for angle in rotations:
         if angle == 180:
             rotated = cv2.rotate(image, cv2.ROTATE_180)
+        elif angle == 90:
+            rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        elif angle == 270:
+            rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
         else:
             rotated = image
 

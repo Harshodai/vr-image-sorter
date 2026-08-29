@@ -12,13 +12,14 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Limit ONNX/RapidOCR thread usage to prevent "Resource temporarily unavailable" errors
-# With 4 workers, this keeps total threads well within Railway's limits.
-ENV OMP_NUM_THREADS=2
-ENV MKL_NUM_THREADS=2
-# inter_op_num_threads=1: Optimal for sequential single-image inference (no graph parallelism)
-ENV ORT_INTER_OP_NUM_THREADS=1
-ENV OCR_POOL_SIZE=1
+# One OS thread per OCR engine. ONNX Runtime otherwise grabs every core per
+# engine, so engines contend instead of scaling — measured 1.06 img/s whether
+# 1, 4 or 8 workers were running. Parallelism now comes from OCR_POOL_SIZE.
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV OCR_THREADS_PER_ENGINE=1
+# 0 = auto-size the engine pool from the container's CPU count at startup.
+ENV OCR_POOL_SIZE=0
 
 # Pre-install robust NumPy version to prevent 2.x conflicts
 RUN pip install "numpy<2.0.0"
@@ -36,13 +37,16 @@ RUN python preload_models.py
 # Install gunicorn for multi-worker support
 RUN pip install --no-cache-dir gunicorn
 
-# Run application with gunicorn + uvicorn workers for high concurrency
-# Configured for Railway's 8 vCPU, 8GB RAM per replica.
-# WEB_WORKERS uses 4 by default (since RapidOCR model is tiny).
+# ONE worker process, on purpose. Upload sessions live in an in-process dict
+# (core/security.py temp_dirs); with >1 worker a chunked upload's later chunks
+# land on a different process, silently start a new session, and the earlier
+# chunks become unreachable. Throughput comes from the in-process OCR engine
+# pool instead, which benchmarks faster anyway (2.21 img/s at pool=10 vs
+# 1.78 img/s across 5 processes on a 10-core host).
+# --max-requests is omitted deliberately: recycling a worker would destroy
+# every live session's temp directory mid-run.
 CMD sh -c "gunicorn main:app \
     --worker-class uvicorn.workers.UvicornWorker \
-    --workers ${WEB_WORKERS:-4} \
+    --workers ${WEB_WORKERS:-1} \
     --bind 0.0.0.0:${PORT:-8000} \
-    --timeout 300 \
-    --max-requests 500 \
-    --max-requests-jitter 50"
+    --timeout 1800"

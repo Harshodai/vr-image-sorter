@@ -18,7 +18,8 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from core.config import (
     MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE, 
-    MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION
+    MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION,
+    SESSION_TTL_SECONDS
 )
 from core.security import (
     validate_filename, validate_session_id, validate_session_token, 
@@ -210,7 +211,7 @@ async def process_images(
         session_token = None  # Frontend already has it from chunk 1
     
     current_time = time.time()
-    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > 3600]
+    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > SESSION_TTL_SECONDS]
     for sid in expired: cleanup_session(sid)
     
     response_data = {
