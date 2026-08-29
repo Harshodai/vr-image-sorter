@@ -32,3 +32,9 @@ class SareeDetails(BaseModel):
 
 class RetryRequest(BaseModel):
     filenames: List[str]
+
+
+class ConfirmReviewRequest(BaseModel):
+    """A human confirming the VR code for an image held in the review queue."""
+    stored_name: str
+    code: str

@@ -1,5 +1,7 @@
 from __future__ import annotations
 import os
+import re
+import shutil
 import io
 import time
 import uuid
@@ -18,15 +20,18 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from core.config import (
     MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE, 
-    MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION
+    MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION,
+    SESSION_TTL_SECONDS, SCAN_TIMEOUT_SECONDS, RETRY_SCAN_DIMENSION
 )
 from core.security import (
     validate_filename, validate_session_id, validate_session_token, 
     generate_session_token, temp_dirs
 )
+from scanner.utils import standardize_filename
 from scanner.pipeline import process_pipeline
+from scanner.result import ScanResult
 from scanner.engine_pool import ocr_pool
-from api.models import RetryRequest
+from api.models import RetryRequest, ConfirmReviewRequest
 
 logger = logging.getLogger("vr-saree-sorter.api")
 router = APIRouter()
@@ -45,16 +50,28 @@ def cleanup_session(session_id: str):
         except Exception as e:
             logger.error("Error cleaning up session %s: %s", session_id, e)
 
-async def scan_in_thread(contents: bytes) -> str | None:
+async def scan_in_thread(contents: bytes, max_dim: int | None = None) -> ScanResult:
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(_executor, process_pipeline, contents),
-            timeout=60.0  # 60s per image — generous for OCR fallback
+            loop.run_in_executor(_executor, process_pipeline, contents, max_dim),
+            timeout=SCAN_TIMEOUT_SECONDS
         )
     except asyncio.TimeoutError:
-        logger.error("Image processing timed out after 60s")
-        return None
+        logger.error("Image processing timed out after %ss", SCAN_TIMEOUT_SECONDS)
+        return ScanResult(method="none", reason="timed out")
+
+
+def _unique_path(directory: str, name: str) -> tuple[str, str]:
+    """Return (path, final_name), suffixing _1, _2... if the name is taken."""
+    base, ext = os.path.splitext(name)
+    candidate, counter = name, 1
+    path = os.path.join(directory, candidate)
+    while os.path.exists(path):
+        candidate = f"{base}_{counter}{ext}"
+        path = os.path.join(directory, candidate)
+        counter += 1
+    return path, candidate
 
 @router.post("/api/process")
 async def process_images(
@@ -100,20 +117,20 @@ async def process_images(
     if session_id and session_id in temp_dirs:
         # Append to existing session
         temp_dir = temp_dirs[session_id]["path"]
-        output_dir = os.path.join(temp_dir, "output")
-        failed_dir = os.path.join(temp_dir, "failed")
         session_token = "existing_token" # We reuse the existing token hash logic later if needed
     else:
         is_new_session = True
         session_id = str(uuid.uuid4())
         temp_dir = tempfile.mkdtemp()
-        output_dir = os.path.join(temp_dir, "output")
-        failed_dir = os.path.join(temp_dir, "failed")
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(failed_dir, exist_ok=True)
-    
+    output_dir = os.path.join(temp_dir, "output")
+    failed_dir = os.path.join(temp_dir, "failed")
+    review_dir = os.path.join(temp_dir, "review")
+    for d in (output_dir, failed_dir, review_dir):
+        os.makedirs(d, exist_ok=True)
+
     processed = []
     failed = []
+    review = []
     
     batch_size = len(validated_files)
     logger.info("Batch processing started: %d file(s), concurrency limit=%d", batch_size, BATCH_CONCURRENCY)
@@ -133,56 +150,65 @@ async def process_images(
                 elapsed = time.monotonic() - file_start
                 logger.info("File scanned in %.2fs: %s", elapsed, safe_filename)
             
-            if result:
+            if result.is_confident:
                 from scanner.utils import standardize_filename
-                clean_name = standardize_filename(result)
-                new_name = f"{clean_name}{ext}"
-                output_path = os.path.join(output_dir, new_name)
-                
-                counter = 1
-                while os.path.exists(output_path):
-                    new_name = f"{clean_name}_{counter}{ext}"
-                    output_path = os.path.join(output_dir, new_name)
-                    counter += 1
-                
+                clean_name = standardize_filename(result.code)
+                output_path, new_name = _unique_path(output_dir, f"{clean_name}{ext}")
                 with open(output_path, "wb") as f:
                     f.write(contents)
-                
+
                 return "processed", {
                     "original_name": filename,
                     "new_name": new_name,
+                    "confidence": round(result.confidence, 4),
+                    "method": result.method,
                     "preview_url": f"/api/preview/{session_id}/{new_name}"
                 }
-            else:
-                failed_path = os.path.join(failed_dir, safe_filename)
-                
-                counter = 1
-                base_name, ext_part = os.path.splitext(safe_filename)
-                while os.path.exists(failed_path):
-                    failed_path = os.path.join(failed_dir, f"{base_name}_{counter}{ext_part}")
-                    counter += 1
-                
-                with open(failed_path, "wb") as f:
+
+            if result.code:
+                # Something was read but it is not trustworthy enough to rename
+                # with. Keep the ORIGINAL filename so nothing is renamed on a
+                # guess, and surface the proposal for a human to confirm.
+                review_path, review_name = _unique_path(review_dir, safe_filename)
+                with open(review_path, "wb") as f:
                     f.write(contents)
-                
-                return "failed", {
+
+                return "review", {
                     "original_name": filename,
-                    "preview_url": f"/api/preview-failed/{session_id}/{os.path.basename(failed_path)}"
+                    "stored_name": review_name,
+                    "suggested_name": f"{result.code}{ext}",
+                    "suggested_code": result.code,
+                    "confidence": round(result.confidence, 4),
+                    "method": result.method,
+                    "reason": result.reason,
+                    "alternatives": [
+                        {"code": c.code, "confidence": round(c.confidence, 4)}
+                        for c in result.candidates[:5]
+                    ],
+                    "preview_url": f"/api/preview-review/{session_id}/{review_name}"
                 }
+
+            failed_path, failed_name = _unique_path(failed_dir, safe_filename)
+            with open(failed_path, "wb") as f:
+                f.write(contents)
+            return "failed", {
+                "original_name": filename,
+                "reason": result.reason,
+                "preview_url": f"/api/preview-failed/{session_id}/{failed_name}"
+            }
         except Exception as e:
             logger.error("Error processing file: %s", type(e).__name__)
             try:
-                failed_path = os.path.join(failed_dir, safe_filename)
-                counter = 1
-                base_name, ext_part = os.path.splitext(safe_filename)
-                while os.path.exists(failed_path):
-                    failed_path = os.path.join(failed_dir, f"{base_name}_{counter}{ext_part}")
-                    counter += 1
+                failed_path, failed_name = _unique_path(failed_dir, safe_filename)
                 with open(failed_path, "wb") as f:
                     f.write(contents)
-                return "failed", {"original_name": filename, "preview_url": f"/api/preview-failed/{session_id}/{os.path.basename(failed_path)}"}
+                return "failed", {
+                    "original_name": filename,
+                    "reason": f"processing error: {type(e).__name__}",
+                    "preview_url": f"/api/preview-failed/{session_id}/{failed_name}"
+                }
             except Exception:
-                return "failed", {"original_name": filename}
+                return "failed", {"original_name": filename, "reason": "processing error"}
 
     tasks = [_process_one(fd) for fd in validated_files]
     results = await asyncio.gather(*tasks)
@@ -192,6 +218,7 @@ async def process_images(
 
     for status, item in results:
         if status == "processed": processed.append(item)
+        elif status == "review": review.append(item)
         else: failed.append(item)
     
     # Removed eager zip generation here to prevent quadratic scaling on chunked uploads.
@@ -210,7 +237,7 @@ async def process_images(
         session_token = None  # Frontend already has it from chunk 1
     
     current_time = time.time()
-    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > 3600]
+    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > SESSION_TTL_SECONDS]
     for sid in expired: cleanup_session(sid)
     
     response_data = {
@@ -218,8 +245,10 @@ async def process_images(
         "session_token": session_token,
         "processed": processed,
         "failed": failed,
+        "review": review,
         "has_processed": len(processed) > 0,
         "has_failed": len(failed) > 0,
+        "has_review": len(review) > 0,
     }
     if os.listdir(output_dir): response_data["download_url"] = f"/api/download/{session_id}"
     if os.listdir(failed_dir): response_data["failed_download_url"] = f"/api/download-failed/{session_id}"
@@ -314,6 +343,61 @@ async def get_failed_preview(session_id: str, filename: str, authorization: Opti
     if not file_path.exists(): raise HTTPException(status_code=404, detail="Failed image not found")
     return FileResponse(str(file_path))
 
+@router.get("/api/preview-review/{session_id}/{filename}")
+async def get_review_preview(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization")):
+    validate_session_id(session_id)
+    safe_filename = validate_filename(filename)
+    session = validate_session_token(session_id, authorization)
+
+    session["access_count"] += 1
+    if session["access_count"] > 1000: raise HTTPException(status_code=429, detail="Too many requests")
+    file_path = Path(session["path"]) / "review" / safe_filename
+
+    try:
+        file_path = file_path.resolve()
+        if not str(file_path).startswith(str((Path(session["path"]) / "review").resolve())): raise HTTPException(status_code=403, detail="Access denied")
+    except Exception: raise HTTPException(status_code=400, detail="Invalid file path")
+    if not file_path.exists(): raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(str(file_path))
+
+
+@router.post("/api/confirm-review/{session_id}")
+async def confirm_review(session_id: str, request: ConfirmReviewRequest, authorization: Optional[str] = Header(None, alias="Authorization")):
+    """
+    A human has read the label and is telling us the code. This is the only
+    path by which a low-confidence image gets renamed, and the supplied code
+    is trusted over anything the scanner proposed.
+    """
+    validate_session_id(session_id)
+    session = validate_session_token(session_id, authorization)
+
+    base = Path(session["path"])
+    review_dir, output_dir = base / "review", base / "output"
+
+    code = standardize_filename(request.code)
+    if not re.fullmatch(r"VR\d{4,8}", code):
+        raise HTTPException(status_code=400, detail="Code must look like VR followed by 4-8 digits")
+
+    safe_filename = validate_filename(request.stored_name)
+    src = (review_dir / safe_filename).resolve()
+    if not str(src).startswith(str(review_dir.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Image not found in review queue")
+
+    ext = os.path.splitext(safe_filename)[1].lower()
+    dest, new_name = _unique_path(str(output_dir), f"{code}{ext}")
+    shutil.move(str(src), dest)
+    logger.info("Review confirmed by user: %s -> %s", safe_filename, new_name)
+
+    return {
+        "success": True,
+        "new_name": new_name,
+        "preview_url": f"/api/preview/{session_id}/{new_name}",
+        "remaining_review": len(os.listdir(review_dir)),
+    }
+
+
 @router.get("/api/download-single/{session_id}/{filename}")
 async def download_single_image(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization")):
     validate_session_id(session_id)
@@ -357,7 +441,11 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
     
     if not os.path.exists(failed_dir): raise HTTPException(status_code=404, detail="No failed images found")
     
+    review_dir = os.path.join(temp_dir, "review")
+    os.makedirs(review_dir, exist_ok=True)
+
     retried_processed = []
+    retried_review = []
     files_to_retry = request.filenames
     if not files_to_retry: raise HTTPException(status_code=400, detail="No filenames provided")
 
@@ -370,26 +458,38 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
             with open(file_path, "rb") as f: contents = f.read()
             img_ext = os.path.splitext(safe_filename)[1].lower()
             
-            result = await scan_in_thread(contents)
-            
-            if result:
-                from scanner.utils import standardize_filename
-                clean_name = standardize_filename(result)
-                new_name = f"{clean_name}{img_ext}"
-                output_path = os.path.join(output_dir, new_name)
-                
-                counter = 1
-                while os.path.exists(output_path):
-                    new_name = f"{clean_name}_{counter}{img_ext}"
-                    output_path = os.path.join(output_dir, new_name)
-                    counter += 1
-                
+            # Escalate: re-scan at a higher resolution. Repeating the original
+            # scan would re-run deterministic work and return the same answer.
+            result = await scan_in_thread(contents, max_dim=RETRY_SCAN_DIMENSION)
+
+            if result.is_confident:
+                clean_name = standardize_filename(result.code)
+                output_path, new_name = _unique_path(output_dir, f"{clean_name}{img_ext}")
                 with open(output_path, "wb") as f_out: f_out.write(contents)
                 os.remove(file_path)
-                
+
                 retried_processed.append({
                     "original_name": safe_filename, "new_name": new_name,
+                    "confidence": round(result.confidence, 4), "method": result.method,
                     "preview_url": f"/api/preview/{session_id}/{new_name}"
+                })
+            elif result.code:
+                # Now readable but still not trustworthy: promote it out of the
+                # failed pile into review rather than renaming on a guess.
+                review_path, review_name = _unique_path(review_dir, safe_filename)
+                with open(review_path, "wb") as f_out: f_out.write(contents)
+                os.remove(file_path)
+
+                retried_review.append({
+                    "original_name": safe_filename, "stored_name": review_name,
+                    "suggested_code": result.code, "suggested_name": f"{result.code}{img_ext}",
+                    "confidence": round(result.confidence, 4), "method": result.method,
+                    "reason": result.reason,
+                    "alternatives": [
+                        {"code": c.code, "confidence": round(c.confidence, 4)}
+                        for c in result.candidates[:5]
+                    ],
+                    "preview_url": f"/api/preview-review/{session_id}/{review_name}"
                 })
         except Exception as e:
             logger.error("Error retrying file %s: %s", filename, e)
@@ -401,7 +501,9 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
     return {
         "success": True,
         "retried_processed": retried_processed,
+        "retried_review": retried_review,
         "still_failed_count": len(os.listdir(failed_dir)),
+        "review_count": len(os.listdir(review_dir)),
         "download_url": f"/api/download/{session_id}" if os.listdir(output_dir) else None,
         "failed_download_url": f"/api/download-failed/{session_id}" if os.listdir(failed_dir) else None,
         "has_processed": len(os.listdir(output_dir)) > 0,

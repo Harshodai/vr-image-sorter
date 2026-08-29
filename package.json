@@ -1,5 +1,5 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "vr-image-sorter",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -8,7 +8,11 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "setup": "node bin/vr-sorter.mjs setup",
+    "start": "node bin/vr-sorter.mjs start",
+    "doctor": "node bin/vr-sorter.mjs doctor",
+    "sort": "node bin/vr-sorter.mjs sort"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -79,5 +83,24 @@
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.38.0",
     "vite": "^5.4.19"
-  }
+  },
+  "bin": {
+    "vr-sorter": "./bin/vr-sorter.mjs"
+  },
+  "files": [
+    "bin/",
+    "backend/",
+    "src/",
+    "public/",
+    "index.html",
+    "vite.config.ts",
+    "tailwind.config.ts",
+    "postcss.config.js",
+    "tsconfig*.json",
+    "components.json",
+    "Makefile",
+    "make.ps1",
+    "make.cmd",
+    "README.md"
+  ]
 }
