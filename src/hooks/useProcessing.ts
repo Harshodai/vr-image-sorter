@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { UploadedImage, ProcessingResult, ProcessedFile, FailedFile, AppState } from '@/types';
+import { UploadedImage, ProcessingResult, ProcessedFile, FailedFile, ReviewFile, AppState } from '@/types';
 import { toast } from 'sonner';
 
 // Configure your backend URL here
@@ -120,6 +120,7 @@ export function useProcessing() {
       const CHUNK_SIZE = 50;
       let allProcessedFiles: ProcessedFile[] = [];
       let allFailedFiles: FailedFile[] = [];
+      let allReviewFiles: ReviewFile[] = [];
       let finalSessionId: string | undefined = undefined;
 
       for (let i = 0; i < images.length; i += CHUNK_SIZE) {
@@ -158,9 +159,22 @@ export function useProcessing() {
           originalName: item.original_name,
           preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
         }));
-        
+
+        const reviewFilesChunk: ReviewFile[] = (data.review ?? []).map((item: any) => ({
+          originalName: item.original_name,
+          storedName: item.stored_name,
+          suggestedCode: item.suggested_code,
+          suggestedName: item.suggested_name,
+          confidence: item.confidence ?? 0,
+          method: item.method ?? 'ocr',
+          reason: item.reason ?? '',
+          alternatives: item.alternatives ?? [],
+          preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
+        }));
+
         allProcessedFiles = [...allProcessedFiles, ...processedFilesChunk];
         allFailedFiles = [...allFailedFiles, ...failedFilesChunk];
+        allReviewFiles = [...allReviewFiles, ...reviewFilesChunk];
 
         // Update progress bar
         setCurrentIndex(Math.min(i + CHUNK_SIZE, images.length));
@@ -171,10 +185,13 @@ export function useProcessing() {
           totalFiles: images.length,
           processedFiles: allProcessedFiles.length,
           failedFiles: allFailedFiles.length,
+          reviewFiles: allReviewFiles.length,
           successRate: Math.round((allProcessedFiles.length / images.length) * 100),
         },
         processedFiles: allProcessedFiles,
         failedFiles: allFailedFiles,
+        reviewFiles: allReviewFiles,
+        hasReview: allReviewFiles.length > 0,
         downloadUrl: finalSessionId && allProcessedFiles.length > 0 ? `${API_BASE_URL}/api/download/${finalSessionId}` : undefined,
         failedDownloadUrl: finalSessionId && allFailedFiles.length > 0 ? `${API_BASE_URL}/api/download-failed/${finalSessionId}` : undefined,
         hasProcessed: allProcessedFiles.length > 0,
@@ -227,15 +244,34 @@ export function useProcessing() {
           originalName: item.original_name,
           newName: item.new_name,
           success: true,
+          confidence: item.confidence,
+          method: item.method,
+          preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
+        }));
+
+        // Retrying at a higher resolution can make an unreadable image readable
+        // but still not trustworthy — those move into the review queue.
+        const newReview: ReviewFile[] = (data.retried_review ?? []).map((item: any) => ({
+          originalName: item.original_name,
+          storedName: item.stored_name,
+          suggestedCode: item.suggested_code,
+          suggestedName: item.suggested_name,
+          confidence: item.confidence ?? 0,
+          method: item.method ?? 'ocr',
+          reason: item.reason ?? '',
+          alternatives: item.alternatives ?? [],
           preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
         }));
 
         // Filter out retried files from failed list
-        const remainingFailed = result.failedFiles.filter(
-          f => !newProcessed.some(p => p.originalName === f.originalName)
-        );
+        const movedOn = new Set([
+          ...newProcessed.map(p => p.originalName),
+          ...newReview.map(r => r.originalName),
+        ]);
+        const remainingFailed = result.failedFiles.filter(f => !movedOn.has(f.originalName));
 
         const allProcessed = [...result.processedFiles, ...newProcessed];
+        const allReview = [...result.reviewFiles, ...newReview];
 
         setResult({
           ...result,
@@ -243,10 +279,13 @@ export function useProcessing() {
             ...result.stats,
             processedFiles: allProcessed.length,
             failedFiles: remainingFailed.length,
+            reviewFiles: allReview.length,
             successRate: Math.round((allProcessed.length / result.stats.totalFiles) * 100)
           },
           processedFiles: allProcessed,
           failedFiles: remainingFailed,
+          reviewFiles: allReview,
+          hasReview: allReview.length > 0,
           downloadUrl: data.download_url ? `${API_BASE_URL}${data.download_url}` : result.downloadUrl,
           failedDownloadUrl: data.failed_download_url ? `${API_BASE_URL}${data.failed_download_url}` : undefined,
           hasProcessed: allProcessed.length > 0,
@@ -254,6 +293,59 @@ export function useProcessing() {
         });
       }
 
+      return true;
+    } catch (err) {
+      console.error(err);
+      return false;
+    }
+  }, [result]);
+
+  /**
+   * A human has read the label and told us the code. This is the only way a
+   * low-confidence image gets renamed, so the typed code wins over the guess.
+   */
+  const confirmReview = useCallback(async (storedName: string, code: string) => {
+    if (!result?.sessionId) return false;
+    try {
+      const response = await authenticatedFetch(
+        `${API_BASE_URL}/api/confirm-review/${result.sessionId}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stored_name: storedName, code }),
+        }
+      );
+      if (!response.ok) return false;
+      const data = await response.json();
+
+      const confirmed = result.reviewFiles.find(f => f.storedName === storedName);
+      const remainingReview = result.reviewFiles.filter(f => f.storedName !== storedName);
+      const allProcessed: ProcessedFile[] = [
+        ...result.processedFiles,
+        {
+          originalName: confirmed?.originalName ?? storedName,
+          newName: data.new_name,
+          success: true,
+          method: 'human',
+          confidence: 1,
+          preview: data.preview_url ? `${API_BASE_URL}${data.preview_url}` : undefined,
+        },
+      ];
+
+      setResult({
+        ...result,
+        stats: {
+          ...result.stats,
+          processedFiles: allProcessed.length,
+          reviewFiles: remainingReview.length,
+          successRate: Math.round((allProcessed.length / result.stats.totalFiles) * 100),
+        },
+        processedFiles: allProcessed,
+        reviewFiles: remainingReview,
+        hasProcessed: true,
+        hasReview: remainingReview.length > 0,
+        downloadUrl: result.downloadUrl ?? `${API_BASE_URL}/api/download/${result.sessionId}`,
+      });
       return true;
     } catch (err) {
       console.error(err);
@@ -289,10 +381,12 @@ export function useProcessing() {
         totalFiles: images.length,
         processedFiles: processedFiles.length,
         failedFiles: failedFiles.length,
+        reviewFiles: 0,
         successRate: Math.round((processedFiles.length / images.length) * 100),
       },
       processedFiles,
       failedFiles,
+      reviewFiles: [],
     });
 
     setState('results');
@@ -322,6 +416,7 @@ export function useProcessing() {
     error,
     processImages,
     retryImages,
+    confirmReview,
     cancelProcessing,
     reset,
   };

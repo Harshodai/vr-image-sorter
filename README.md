@@ -37,13 +37,21 @@ If you have specific architectural questions, jump straight to the source:
 ## 🛠️ Local Development
 
 ### Prerequisites
-- **Python 3.10+**
+- **Python 3.9+** (3.12 recommended)
 - **Node.js 20+**
 - **System Libs**: 
   - Windows: [VC++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
   - Linux: `sudo apt-get install libzbar0 libgl1`
 
 ### Quick Start
+
+**Single command (any platform, needs only Node + Python)**
+```bash
+npx github:Harshodai/vr-image-sorter doctor   # what is missing
+npx github:Harshodai/vr-image-sorter setup    # install everything
+npx github:Harshodai/vr-image-sorter start    # open http://localhost:8080
+npx github:Harshodai/vr-image-sorter update   # pull latest, re-run setup
+```
 
 **macOS / Linux**
 ```bash
@@ -66,6 +74,56 @@ which cuts the Python install from minutes to seconds. Install it with
 Run `make help` / `.\make.cmd help` for the full target list
 (`up`/`down` for Docker, `test` for the accuracy check, `bench` for timing,
 `dist` to build the distributable zip).
+
+### Sorting a large backlog (100k images)
+
+Do not do this through the browser — the tab has to hold every File object and
+preview blob, and a crash loses the whole run. Use the folder mode: it reads
+from disk, records progress after every image, and resumes where it stopped.
+
+```bash
+make sort   IN=./photos OUT=./sorted      # or: npx github:Harshodai/vr-image-sorter sort --input ... --output ...
+make resume IN=./photos OUT=./sorted      # after an interruption
+make watch  IN=./dropbox OUT=./sorted     # process files as they are dropped in
+```
+
+Add `SORT_ARGS=--copy` to leave the input folder untouched.
+
+Results land in three folders, and the split is the point:
+
+| folder | meaning |
+|---|---|
+| `renamed/` | confidently identified, renamed to `VR<digits>.<ext>` |
+| `review/` | a code was read but not trusted — **keeps its original filename** |
+| `failed/` | nothing readable — keeps its original filename |
+
+Nothing in `review/` is ever renamed on a guess. Confirm those in the web UI
+(magnify the label first), or in bulk via the spreadsheet:
+
+```bash
+# open sorted/review.csv, fill in the `corrected_code` column, then:
+make apply OUT=./sorted
+```
+
+`manifest.jsonl` records every image with its code, confidence, method and the
+reason it landed where it did — it is both the audit trail and the resume index.
+
+### Accuracy model
+
+A wrong rename is silent and permanent; a review is cheap. So an image is only
+renamed automatically when the read is trustworthy. It is sent to review when:
+
+- confidence is below `OCR_MIN_CONFIDENCE` (default 0.90 — correct reads on the
+  sample set scored 0.944-0.998, so this has real headroom),
+- the code only matched after `O`->`0` / `I`->`1` character substitution, which
+  can rescue a genuine read or invent a plausible wrong one, or
+- two different codes were both read confidently.
+
+Barcodes (Code128/QR) carry their own checksums, so a successful barcode decode
+is self-verifying and never needs review.
+
+Tune with `OCR_MIN_CONFIDENCE` (higher = more review, fewer automatic renames)
+and `OCR_EARLY_EXIT_CONFIDENCE` (lower = faster, less cross-checking).
 
 ### Tuning throughput
 The backend runs as a **single** worker process; concurrency comes from an

@@ -1,73 +1,26 @@
-import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw, Maximize2, RefreshCw } from 'lucide-react';
+import { Upload, CheckCircle, XCircle, BarChart3, Download, RotateCcw, Maximize2, RefreshCw, AlertTriangle } from 'lucide-react';
 import { ProcessingResult, ProcessedFile, FailedFile } from '@/types';
 import { Button } from '@/components/ui/button';
 import { StatsCard } from './StatsCard';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { ImageLightbox } from './ImageLightbox';
-import { getAuthenticatedDownload, getAuthenticatedImageUrl, getAuthenticatedSingleDownload } from '@/hooks/useProcessing';
+import { AuthenticatedImage } from './AuthenticatedImage';
+import { ReviewSection } from './ReviewSection';
+import { DownloadConfirmDialog } from './DownloadConfirmDialog';
+import { getAuthenticatedDownload, getAuthenticatedSingleDownload } from '@/hooks/useProcessing';
 import { toast } from 'sonner';
 
 interface ResultsViewProps {
   result: ProcessingResult;
   onReset: () => void;
   onRetry: (filenames: string[], sessionId: string) => Promise<boolean>;
+  onConfirmReview: (storedName: string, code: string) => Promise<boolean>;
 }
 
-// Component for authenticated image loading
-function AuthenticatedImage({ src, alt, className, onClick }: {
-  src: string;
-  alt: string;
-  className?: string;
-  onClick?: () => void;
-}) {
-  const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    let blobUrl: string | null = null;
-
-    async function loadImage() {
-      try {
-        setLoading(true);
-        setError(false);
-        blobUrl = await getAuthenticatedImageUrl(src);
-        if (mounted) {
-          setImageSrc(blobUrl);
-          setLoading(false);
-        }
-      } catch (err) {
-        if (mounted) {
-          setError(true);
-          setLoading(false);
-        }
-      }
-    }
-
-    loadImage();
-
-    return () => {
-      mounted = false;
-      if (blobUrl) {
-        URL.revokeObjectURL(blobUrl);
-      }
-    };
-  }, [src]);
-
-  if (loading) {
-    return <div className={`${className} bg-muted animate-pulse`} />;
-  }
-
-  if (error || !imageSrc) {
-    return <div className={`${className} bg-muted flex items-center justify-center text-muted-foreground text-xs`}>Failed to load</div>;
-  }
-
-  return <img src={imageSrc} alt={alt} className={className} onClick={onClick} />;
-}
-
-export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
-  const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
+export function ResultsView({ result, onReset, onRetry, onConfirmReview }: ResultsViewProps) {
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string; caption?: string } | null>(null);
+  // Which download the confirm dialog is gating, if any.
+  const [pendingDownload, setPendingDownload] = useState<'processed' | 'all' | null>(null);
   const [downloadingSuccess, setDownloadingSuccess] = useState(false);
   const [downloadingFailed, setDownloadingFailed] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
@@ -80,7 +33,7 @@ export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
   const hasFailed = result.failedFiles.length > 0;
   const hasBoth = hasProcessed && hasFailed;
 
-  const handleDownloadSuccess = async () => {
+  const runDownloadSuccess = async () => {
     if (result.downloadUrl) {
       setDownloadingSuccess(true);
       try {
@@ -94,6 +47,17 @@ export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
     } else {
       toast.info('Demo mode: Connect to backend for actual ZIP download.');
     }
+  };
+
+  // Every route to the processed ZIP goes through the check-first dialog.
+  const handleDownloadSuccess = () => setPendingDownload('processed');
+  const handleDownloadAll = () => setPendingDownload('all');
+
+  const runPendingDownload = () => {
+    const which = pendingDownload;
+    setPendingDownload(null);
+    if (which === 'processed') void runDownloadSuccess();
+    if (which === 'all') void runDownloadAll();
   };
 
   const handleDownloadFailed = async () => {
@@ -112,7 +76,7 @@ export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
     }
   };
 
-  const handleDownloadAll = async () => {
+  const runDownloadAll = async () => {
     setDownloadingAll(true);
     try {
       // Download success ZIP first
@@ -209,18 +173,24 @@ export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
           variant="success"
         />
         <StatsCard
+          icon={AlertTriangle}
+          label="Needs Review"
+          value={result.stats.reviewFiles ?? 0}
+          variant="warning"
+        />
+        <StatsCard
           icon={XCircle}
-          label="Failed After Retry"
+          label="Unreadable"
           value={result.stats.failedFiles}
           variant="destructive"
         />
-        <StatsCard
-          icon={BarChart3}
-          label="Success Rate"
-          value={`${result.stats.successRate}%`}
-          variant={result.stats.successRate >= 80 ? 'success' : 'warning'}
-        />
       </div>
+
+      <ReviewSection
+        files={result.reviewFiles ?? []}
+        onConfirm={onConfirmReview}
+        onMagnify={(src, name, caption) => setLightboxImage({ src, name, caption })}
+      />
 
       {/* Download All Button - only show when both sections exist */}
       {hasBoth && (
@@ -459,8 +429,18 @@ export function ResultsView({ result, onReset, onRetry }: ResultsViewProps) {
           onClose={() => setLightboxImage(null)}
           imageSrc={lightboxImage.src}
           imageName={lightboxImage.name}
+          caption={lightboxImage.caption}
         />
       )}
+
+      <DownloadConfirmDialog
+        open={pendingDownload !== null}
+        onOpenChange={open => !open && setPendingDownload(null)}
+        onConfirm={runPendingDownload}
+        processedCount={result.processedFiles.length}
+        reviewCount={result.reviewFiles?.length ?? 0}
+        failedCount={result.failedFiles.length}
+      />
     </div>
   );
 }

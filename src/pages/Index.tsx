@@ -13,7 +13,7 @@ import { useProcessing } from '@/hooks/useProcessing';
 
 const Index = () => {
   const { images, addImages, removeImage, clearImages, hasImages } = useImageUpload();
-  const { state, currentIndex, result, error, processImages, retryImages, cancelProcessing, reset } = useProcessing();
+  const { state, currentIndex, result, error, processImages, retryImages, confirmReview, cancelProcessing, reset } = useProcessing();
 
   const handleStartProcessing = () => {
     if (hasImages) {
@@ -91,7 +91,12 @@ const Index = () => {
         )}
 
         {state === 'results' && result && (
-          <ResultsView result={result} onReset={handleReset} onRetry={retryImages} />
+          <ResultsView
+            result={result}
+            onReset={handleReset}
+            onRetry={retryImages}
+            onConfirmReview={confirmReview}
+          />
         )}
       </main>
 

@@ -17,10 +17,10 @@ function Resolve-Python {
     foreach ($c in @('python', 'python3', 'py')) {
         if (Have $c) {
             $v = & $c --version 2>&1
-            if ($v -match 'Python 3\.(\d+)' -and [int]$Matches[1] -ge 10) { return $c }
+            if ($v -match 'Python 3\.(\d+)' -and [int]$Matches[1] -ge 9) { return $c }
         }
     }
-    throw "Python 3.10+ not found. Install from https://python.org and re-open the terminal."
+    throw "Python 3.9+ not found. Install from https://python.org and re-open the terminal."
 }
 
 function Setup-Backend {

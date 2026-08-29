@@ -45,6 +45,38 @@ BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", OCR_POOL_SIZE + 2))
 # which makes extra workers contend instead of scale.
 OCR_THREADS_PER_ENGINE = int(os.environ.get("OCR_THREADS_PER_ENGINE", 1))
 
+# Accuracy gate
+#
+# A wrong rename is silent and permanent; a review is cheap. Anything the
+# scanner is not sure about goes to a human rather than being guessed at.
+#
+# Measured on the sample set, every correct OCR read scored between 0.944 and
+# 0.998 (median 0.996) and none required character substitution, so 0.90 is a
+# floor with real headroom rather than an invented number. Raise it to send
+# more borderline images to review; lower it only with labelled evidence.
+OCR_MIN_CONFIDENCE = float(os.environ.get("OCR_MIN_CONFIDENCE", 0.90))
+
+# A read at or above this confidence, with no character substitution, is taken
+# as settled and stops the remaining rotations/sources. Correct reads on the
+# sample set clustered at 0.994-0.998, so the common case exits after one pass
+# while anything weaker still gets the full sweep and the agreement check.
+# Lower it to go faster with less cross-checking; raise it toward 1.0 to always
+# sweep everything.
+OCR_EARLY_EXIT_CONFIDENCE = float(os.environ.get("OCR_EARLY_EXIT_CONFIDENCE", 0.98))
+
+# Hard ceiling on a single image's scan. Four rotations x two sources is the
+# worst case, so this is generous; exceeding it means something is wrong.
+SCAN_TIMEOUT_SECONDS = float(os.environ.get("SCAN_TIMEOUT_SECONDS", 120))
+
+# Longest edge an image is scaled to before scanning. Bigger reads small label
+# text better but costs time and memory roughly quadratically.
+MAX_SCAN_DIMENSION = int(os.environ.get("MAX_SCAN_DIMENSION", 1200))
+
+# Resolution used when a human explicitly retries an image. Higher than the
+# default because retrying at the same resolution re-runs deterministic work
+# and cannot produce a different answer.
+RETRY_SCAN_DIMENSION = int(os.environ.get("RETRY_SCAN_DIMENSION", 2000))
+
 # Feature Flags
 ENABLE_BARCODE_SCANNER = os.environ.get("ENABLE_BARCODE_SCANNER", "True").lower() not in ("false", "0", "no")
 

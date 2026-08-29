@@ -2,79 +2,126 @@ from __future__ import annotations
 import cv2
 import re
 import logging
+from core.config import OCR_EARLY_EXIT_CONFIDENCE
 from scanner.engine_pool import ocr_pool
+from scanner.result import Candidate
 
 logger = logging.getLogger("vr-saree-sorter.strategies.ocr")
 
-def _clean_ocr_text(text: str) -> str:
-    """Aggressively clean OCR text for VR code extraction."""
+# VR immediately followed by 4-8 digits, and not more digits (not VRP, VRS...).
+VR_RX = re.compile(r"VR\d{4,8}(?!\d)")
+
+# Characters OCR routinely confuses with digits. Applying this map can rescue a
+# genuine read — and can equally manufacture a plausible-looking code out of a
+# misread. Matches that only appear after substitution are flagged so they can
+# be sent to a human instead of silently renaming a file.
+_DIGIT_MAP = str.maketrans("OoIl|", "00111")
+
+
+def _normalise(text: str, substitute: bool) -> str:
     clean = text.replace(" ", "").upper()
-    # Common OCR misreads: '/' or '\\' read instead of 'V' before 'R'
+    # Common OCR misread: '/' or '\' seen instead of 'V' before 'R'.
     clean = re.sub(r"[/\\]R(\d)", r"VR\1", clean)
-    ocr_digit_map = str.maketrans("OoIl|", "00111")
-    clean = clean.translate(ocr_digit_map)
-    clean = re.sub(r"[^A-Z0-9]", "", clean)
-    return clean
+    if substitute:
+        clean = clean.translate(_DIGIT_MAP)
+    return re.sub(r"[^A-Z0-9]", "", clean)
 
-def _ocr_with_rotations(engine, image) -> str | None:
-    """Run DBNet across rotational passes"""
-    # 90/270 are required: sideways labels are common on hand-held photos and
-    # DBNet will not recover them from an upright pass.
-    rotations = [0, 180, 90, 270]
-    best_match = None
 
-    for angle in rotations:
-        if angle == 180:
-            rotated = cv2.rotate(image, cv2.ROTATE_180)
-        elif angle == 90:
-            rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-        elif angle == 270:
-            rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        else:
-            rotated = image
+def _extract(text: str) -> tuple[str, bool] | None:
+    """Return (code, substituted) or None."""
+    strict = VR_RX.search(_normalise(text, substitute=False))
+    loose = VR_RX.search(_normalise(text, substitute=True))
+    if strict:
+        # A strict match is trustworthy; note if substitution disagrees with it.
+        return strict.group(0), bool(loose and loose.group(0) != strict.group(0))
+    if loose:
+        return loose.group(0), True
+    return None
 
-        # Neural networks process raw images better than thresholded logic.
-        ocr_result, _ = engine(rotated)
-        if ocr_result:
-            # Strategy 1: Check individual lines
-            for _, text, _ in ocr_result:
-                clean = _clean_ocr_text(text)
-                # Use strict regex: VR immediately followed by digits (not VRP, VRS, etc.)
-                match = re.search(r"VR\d{4,8}(?!\d)", clean)
-                if match:
-                    return match.group(0)
 
-            # Strategy 2: Concatenate everything fallback
-            all_text = " ".join([line[1] for line in ocr_result])
-            vr = _clean_ocr_text(all_text)
-            match = re.search(r"VR\d{4,8}(?!\d)", vr)
-            if match:
-                candidate = match.group(0)
-                if best_match is None or len(candidate) > len(best_match):
-                    best_match = candidate
-    
-    return best_match
+def _rotate(image, angle: int):
+    if angle == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    if angle == 90:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if angle == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return image
 
-def scan_ocr(image, roi_image=None) -> str | None:
-    """Strategy wrapper to orchestrate the OCR Object Pool."""
+
+def _settled(candidates: list[Candidate]) -> bool:
+    """A clean, high-confidence read with nothing disagreeing with it."""
+    strong = [c for c in candidates
+              if c.confidence >= OCR_EARLY_EXIT_CONFIDENCE and not c.substituted]
+    if not strong:
+        return False
+    return len({c.code for c in candidates}) == 1
+
+
+def _ocr_candidates(engine, image, source: str) -> list[Candidate]:
+    """
+    Read one image across orientations and return every VR code seen.
+
+    Rotations continue until a read is settled — high confidence, no character
+    substitution, nothing disagreeing. Weaker reads keep sweeping so that the
+    agreement check downstream has more than one pass to work with. 90/270 are
+    not optional: labels photographed sideways are invisible to an upright pass.
+    """
+    found: list[Candidate] = []
+    for angle in (0, 180, 90, 270):
+        try:
+            ocr_result, _ = engine(_rotate(image, angle))
+        except Exception as e:
+            logger.debug("OCR engine error at %s rot%d: %s", source, angle, type(e).__name__)
+            continue
+        if not ocr_result:
+            continue
+
+        for _, text, score in ocr_result:
+            hit = _extract(text)
+            if hit:
+                code, substituted = hit
+                found.append(Candidate(code, float(score), "ocr", source, angle, substituted))
+
+        # Codes split across two detected lines ("VR" | "226941") only survive
+        # concatenation. Scored conservatively: joining text loses the
+        # per-line confidence, so take the weakest line involved.
+        joined = " ".join(line[1] for line in ocr_result)
+        hit = _extract(joined)
+        if hit and not any(c.code == hit[0] and c.rotation == angle for c in found):
+            scores = [float(line[2]) for line in ocr_result] or [0.0]
+            found.append(Candidate(hit[0], min(scores), "ocr", source, angle, True))
+
+        if _settled(found):
+            logger.debug("Settled on %s at %s rot%d", found[0].code, source, angle)
+            return found
+
+    return found
+
+
+def scan_ocr(image, roi_image=None) -> list[Candidate]:
+    """Read the ROI and the full frame, returning every candidate from both."""
     engine = ocr_pool.acquire()
+    candidates: list[Candidate] = []
     try:
-        images_to_try = []
+        sources = []
         if roi_image is not None:
-            # Upscale ROI locally to prevent dependency loops
             h, w = roi_image.shape[:2]
-            scaled = cv2.resize(roi_image, (int(w*(1200/w)), int(h*(1200/w))), cv2.INTER_CUBIC) if w < 1200 else roi_image
-            images_to_try.append(("roi", scaled))
-        images_to_try.append(("full", image))
-        
-        for name, img in images_to_try:
-            result = _ocr_with_rotations(engine, img)
-            if result:
-                logger.debug(f"OCR match found from {name} source")
-                return result
+            if w < 1200 and w > 0:
+                scale = 1200 / w
+                roi_image = cv2.resize(
+                    roi_image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC
+                )
+            sources.append(("roi", roi_image))
+        sources.append(("full", image))
+
+        for name, img in sources:
+            candidates.extend(_ocr_candidates(engine, img, name))
+            if _settled(candidates):
+                break
     except Exception as e:
-        logger.error(f"OCR processing error: {type(e).__name__}")
+        logger.error("OCR processing error: %s", type(e).__name__)
     finally:
         ocr_pool.release(engine)
-        
-    return None
+
+    return candidates

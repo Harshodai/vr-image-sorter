@@ -21,7 +21,7 @@ NPM_INSTALL = npm ci --prefer-offline --no-audit --fund=false || npm install --n
 
 .DEFAULT_GOAL := help
 .PHONY: help setup setup-backend setup-frontend dev dev-backend dev-frontend \
-        up down logs build rebuild test bench clean dist doctor
+        up down logs build rebuild test bench clean dist doctor sort resume watch apply
 
 help: ## Show this help
 	@echo "make <target>   (Windows: .\\make.cmd <target>)"
@@ -75,6 +75,26 @@ build: ## Build images without starting
 
 rebuild: ## Force full rebuild, no cache
 	docker compose build --no-cache
+
+## ---------- bulk folder processing ----------
+# The browser cannot hold 100k File objects and preview blobs; these read from
+# disk instead, record progress per image, and resume after an interruption.
+
+sort: ## Sort a folder: make sort IN=./photos OUT=./sorted
+	@test -n "$(IN)" -a -n "$(OUT)" || { echo "usage: make sort IN=./photos OUT=./sorted"; exit 2; }
+	cd backend && OMP_NUM_THREADS=1 ../$(VENV)/bin/python cli.py sort --input "$(abspath $(IN))" --output "$(abspath $(OUT))" $(SORT_ARGS)
+
+resume: ## Continue an interrupted sort: make resume IN=./photos OUT=./sorted
+	@test -n "$(IN)" -a -n "$(OUT)" || { echo "usage: make resume IN=./photos OUT=./sorted"; exit 2; }
+	cd backend && OMP_NUM_THREADS=1 ../$(VENV)/bin/python cli.py sort --input "$(abspath $(IN))" --output "$(abspath $(OUT))" --resume $(SORT_ARGS)
+
+watch: ## Process images as they land: make watch IN=./dropbox OUT=./sorted
+	@test -n "$(IN)" -a -n "$(OUT)" || { echo "usage: make watch IN=./dropbox OUT=./sorted"; exit 2; }
+	cd backend && OMP_NUM_THREADS=1 ../$(VENV)/bin/python cli.py watch --input "$(abspath $(IN))" --output "$(abspath $(OUT))" $(SORT_ARGS)
+
+apply: ## Apply corrected codes: make apply OUT=./sorted
+	@test -n "$(OUT)" || { echo "usage: make apply OUT=./sorted"; exit 2; }
+	cd backend && ../$(VENV)/bin/python cli.py apply --csv "$(abspath $(OUT))/review.csv" --output "$(abspath $(OUT))"
 
 ## ---------- checks ----------
 
