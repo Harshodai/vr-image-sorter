@@ -6,6 +6,10 @@ Saree Organizer is a production-ready tool designed to automate the painful proc
 
 ---
 
+> **Setting this up? Start with [SETUP.md](./SETUP.md)** — install, run, and how
+> to tune for correctness and for speed, with the calibration step that turns
+> "accuracy" into a number you can defend.
+
 ## 📖 Project Documentation
 
 If you have specific architectural questions, jump straight to the source:
