@@ -3,15 +3,21 @@
  * Single-command launcher, so a Windows operator never has to remember the
  * Python/venv/uvicorn/vite incantations.
  *
- *   npx github:Harshodai/vr-image-sorter setup
- *   npx github:Harshodai/vr-image-sorter start
- *   npx github:Harshodai/vr-image-sorter update
- *   npx github:Harshodai/vr-image-sorter sort --input C:\photos --output C:\sorted
+ * Install once with a git clone, then drive it with npm scripts:
+ *   npm run setup
+ *   npm start
+ *   npm run update
+ *   npm run sort -- --input C:\photos --output C:\sorted
+ *
+ * `npx github:Harshodai/vr-image-sorter doctor` works without cloning, but npx
+ * unpacks into a cache npm can clear, so it is not where the venv and OCR
+ * models should live.
  *
  * Node is the only thing that has to be installed up front; everything else is
  * checked for and reported with the exact command to fix it.
  */
 import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,7 +108,7 @@ function cmdSetup() {
     if (run('npm', ['install', '--no-audit', '--fund=false'])) return 1;
   }
 
-  console.log(c.green('\nSetup complete. Start it with:  npx github:Harshodai/vr-image-sorter start'));
+  console.log(c.green('\nSetup complete. Start it with:  npm start'));
   return 0;
 }
 
@@ -138,10 +144,36 @@ function cmdUpdate() {
   return cmdSetup();
 }
 
-function cmdStart() {
+/** Resolves true if nothing is already listening on the port. */
+function portFree(port) {
+  return new Promise(resolve => {
+    const srv = createServer();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    srv.listen(port, '0.0.0.0');
+  });
+}
+
+async function cmdStart() {
   requireSetup();
   const port = process.env.PORT || '8000';
   const uiPort = process.env.UI_PORT || '8080';
+
+  // Without this, a busy port kills the backend on startup and the launcher
+  // tears the frontend down with it — which looks like the app is broken
+  // rather than like something else owning the port.
+  for (const [name, p, env] of [['Backend', port, 'PORT'], ['Frontend', uiPort, 'UI_PORT']]) {
+    if (!(await portFree(p))) {
+      console.error(c.red(`${name} port ${p} is already in use.`));
+      console.error(`  Something else is listening there — often a container, or an earlier`);
+      console.error(`  run that did not shut down. Free it, or pick another port:`);
+      console.error(c.bold(IS_WIN ? `    set ${env}=${Number(p) + 10} && npm start`
+                                  : `    ${env}=${Number(p) + 10} npm start`));
+      if (IS_WIN) console.error(c.dim(`  Find the owner with:  netstat -ano | findstr :${p}`));
+      else console.error(c.dim(`  Find the owner with:  lsof -nP -iTCP:${p} -sTCP:LISTEN`));
+      return 1;
+    }
+  }
 
   const backend = spawn(join(VENV_BIN, IS_WIN ? 'uvicorn.exe' : 'uvicorn'),
     ['main:app', '--host', '0.0.0.0', '--port', port],
@@ -204,7 +236,7 @@ ${c.bold('vr-sorter')} — saree image sorter
   ${c.bold('apply')}    apply corrected codes  --csv <review.csv> --output <dir>
 
 Sorting 100k images is a folder job, not a browser job:
-  npx github:Harshodai/vr-image-sorter sort --input ./photos --output ./sorted --resume
+  npm run sort -- --input ./photos --output ./sorted --resume
 `);
   return 0;
 }
@@ -221,5 +253,5 @@ if (!handler) {
   console.error(c.red(`Unknown command: ${command}`));
   process.exit(usage() || 1);
 }
-const code = handler();
-if (code !== null) process.exit(code);
+const code = await handler();
+if (code !== null && code !== undefined) process.exit(code);
