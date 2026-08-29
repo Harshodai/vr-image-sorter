@@ -12,7 +12,10 @@
     "setup": "node bin/vr-sorter.mjs setup",
     "start": "node bin/vr-sorter.mjs start",
     "doctor": "node bin/vr-sorter.mjs doctor",
-    "sort": "node bin/vr-sorter.mjs sort"
+    "sort": "node bin/vr-sorter.mjs sort",
+    "update": "node bin/vr-sorter.mjs update",
+    "watch": "node bin/vr-sorter.mjs watch",
+    "apply": "node bin/vr-sorter.mjs apply"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

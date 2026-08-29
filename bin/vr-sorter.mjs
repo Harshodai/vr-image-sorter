@@ -113,6 +113,18 @@ function requireSetup() {
 }
 
 function cmdUpdate() {
+  if (!existsSync(join(ROOT, '.git'))) {
+    console.error(c.red('This copy is not a git checkout, so it cannot update itself.'));
+    console.error('  You are most likely running it through `npx`, which unpacks into a');
+    console.error('  temporary cache that npm can clear at any time — not somewhere to keep');
+    console.error('  a venv and downloaded OCR models.');
+    console.error('\n  Install it properly instead:');
+    console.error(c.bold('    git clone https://github.com/Harshodai/vr-image-sorter.git'));
+    console.error(c.bold('    cd vr-image-sorter'));
+    console.error(c.bold('    npm run setup'));
+    console.error('\n  After that, `npm run update` works from inside that folder.');
+    return 1;
+  }
   if (!which('git')) {
     console.error(c.red('git not found, cannot update.'));
     return 1;
@@ -152,25 +164,31 @@ function cmdStart() {
   return null; // long-running
 }
 
-function cmdSort(argv) {
-  requireSetup();
-  return run(VENV_PY, ['cli.py', 'sort', ...argv], {
-    cwd: join(ROOT, 'backend'),
-    env: { ...process.env, OMP_NUM_THREADS: '1', MKL_NUM_THREADS: '1' },
+/**
+ * cli.py is spawned with cwd set to backend/, so a relative --input the user
+ * typed would resolve against backend/ instead of where they are standing.
+ * Make every path argument absolute against their actual cwd first.
+ */
+const PATH_FLAGS = new Set(['--input', '--output', '--csv']);
+function absolutisePaths(argv) {
+  return argv.map((arg, i) => {
+    const prev = argv[i - 1];
+    if (prev && PATH_FLAGS.has(prev)) return resolve(process.cwd(), arg);
+    for (const flag of PATH_FLAGS) {
+      if (arg.startsWith(`${flag}=`)) {
+        return `${flag}=${resolve(process.cwd(), arg.slice(flag.length + 1))}`;
+      }
+    }
+    return arg;
   });
 }
 
-function cmdWatch(argv) {
+function runCli(sub, argv) {
   requireSetup();
-  return run(VENV_PY, ['cli.py', 'watch', ...argv], {
+  return run(VENV_PY, ['cli.py', sub, ...absolutisePaths(argv)], {
     cwd: join(ROOT, 'backend'),
     env: { ...process.env, OMP_NUM_THREADS: '1', MKL_NUM_THREADS: '1' },
   });
-}
-
-function cmdApply(argv) {
-  requireSetup();
-  return run(VENV_PY, ['cli.py', 'apply', ...argv], { cwd: join(ROOT, 'backend') });
 }
 
 function usage() {
@@ -194,7 +212,8 @@ Sorting 100k images is a folder job, not a browser job:
 const [command, ...rest] = process.argv.slice(2);
 const table = {
   doctor: cmdDoctor, setup: cmdSetup, update: cmdUpdate, start: cmdStart,
-  sort: () => cmdSort(rest), watch: () => cmdWatch(rest), apply: () => cmdApply(rest),
+  sort: () => runCli('sort', rest), watch: () => runCli('watch', rest),
+  apply: () => runCli('apply', rest),
   help: usage, '--help': usage, '-h': usage, undefined: usage,
 };
 const handler = table[command];
