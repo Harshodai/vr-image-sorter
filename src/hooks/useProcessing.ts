@@ -2,12 +2,20 @@ import { useState, useCallback, useRef } from 'react';
 import { UploadedImage, ProcessingResult, ProcessedFile, FailedFile, ReviewFile, AppState } from '@/types';
 import { toast } from 'sonner';
 
-// Configure your backend URL here
-// Priority: runtime config (injected at container startup) > Vite build-time env > hardcoded fallback
+declare global {
+  interface Window {
+    __RUNTIME_CONFIG__?: { API_URL?: string };
+  }
+}
+
+// Backend URL. Priority: runtime config injected at container startup >
+// Vite build-time env > localhost. The fallback is local on purpose: this runs
+// as a local application, and silently talking to some remote host because an
+// env var was missing is worse than failing to connect to localhost.
 const API_URL_RAW =
-  (typeof window !== 'undefined' && (window as any).__RUNTIME_CONFIG__?.API_URL) ||
+  (typeof window !== 'undefined' && window.__RUNTIME_CONFIG__?.API_URL) ||
   import.meta.env.VITE_API_URL ||
-  'https://vr-image-sorter-production.up.railway.app';
+  'http://localhost:8000';
 // Ensure the URL does not end with a trailing slash to avoid double slashes in paths
 const API_BASE_URL = API_URL_RAW.endsWith('/') ? API_URL_RAW.slice(0, -1) : API_URL_RAW;
 
@@ -36,6 +44,56 @@ async function fetchWithRetry(
   throw new Error('Fetch failed after retries');
 }
 
+/** Wire format returned by the backend. snake_case, unlike the app's own types. */
+interface ApiProcessedFile {
+  original_name: string;
+  new_name: string;
+  confidence?: number;
+  method?: string;
+  preview_url?: string;
+}
+
+interface ApiFailedFile {
+  original_name: string;
+  reason?: string;
+  preview_url?: string;
+}
+
+interface ApiReviewFile {
+  original_name: string;
+  stored_name: string;
+  suggested_code: string;
+  suggested_name: string;
+  confidence?: number;
+  method?: string;
+  reason?: string;
+  alternatives?: { code: string; confidence: number }[];
+  preview_url?: string;
+}
+
+interface ApiProcessResponse {
+  session_id: string;
+  session_token: string | null;
+  processed: ApiProcessedFile[];
+  failed: ApiFailedFile[];
+  review?: ApiReviewFile[];
+}
+
+interface ApiRetryResponse {
+  success: boolean;
+  retried_processed: ApiProcessedFile[];
+  retried_review?: ApiReviewFile[];
+  download_url?: string | null;
+  failed_download_url?: string | null;
+}
+
+interface ApiConfirmResponse {
+  success: boolean;
+  new_name: string;
+  preview_url?: string;
+  remaining_review: number;
+}
+
 // Store session token securely in memory (not localStorage for security)
 let sessionToken: string | null = null;
 
@@ -56,27 +114,22 @@ export async function authenticatedFetch(url: string, options: RequestInit = {})
 
 // Helper to get authenticated blob URL for downloads with custom filename
 export async function getAuthenticatedDownload(url: string, filename?: string): Promise<void> {
-  try {
-    const response = await authenticatedFetch(url);
-    if (!response.ok) {
-      throw new Error('Download failed');
-    }
-    const blob = await response.blob();
-    const blobUrl = URL.createObjectURL(blob);
-
-    // Create a temporary link and click it
-    const link = document.createElement('a');
-    link.href = blobUrl;
-    link.download = filename || 'download.zip';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    // Cleanup blob URL
-    URL.revokeObjectURL(blobUrl);
-  } catch (error) {
-    throw error;
+  const response = await authenticatedFetch(url);
+  if (!response.ok) {
+    throw new Error('Download failed');
   }
+  const blob = await response.blob();
+  const blobUrl = URL.createObjectURL(blob);
+
+  // Create a temporary link and click it
+  const link = document.createElement('a');
+  link.href = blobUrl;
+  link.download = filename || 'download.zip';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  URL.revokeObjectURL(blobUrl);
 }
 
 // Helper for single file download (processed or failed)
@@ -141,26 +194,26 @@ export function useProcessing() {
           throw new Error('Processing failed. Please check if the backend is running.');
         }
 
-        const data = await response.json();
-        
+        const data: ApiProcessResponse = await response.json();
+
         // Store the session token for authenticated requests
         sessionToken = data.session_token || sessionToken;
         finalSessionId = data.session_id || finalSessionId;
 
         // Create authenticated preview URLs
-        const processedFilesChunk: ProcessedFile[] = data.processed.map((item: any) => ({
+        const processedFilesChunk: ProcessedFile[] = data.processed.map((item) => ({
           originalName: item.original_name,
           newName: item.new_name,
           success: true,
           preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
         }));
 
-        const failedFilesChunk: FailedFile[] = data.failed.map((item: any) => ({
+        const failedFilesChunk: FailedFile[] = data.failed.map((item) => ({
           originalName: item.original_name,
           preview: item.preview_url ? `${API_BASE_URL}${item.preview_url}` : undefined,
         }));
 
-        const reviewFilesChunk: ReviewFile[] = (data.review ?? []).map((item: any) => ({
+        const reviewFilesChunk: ReviewFile[] = (data.review ?? []).map((item) => ({
           originalName: item.original_name,
           storedName: item.stored_name,
           suggestedCode: item.suggested_code,
@@ -236,11 +289,11 @@ export function useProcessing() {
         throw new Error('Retry failed');
       }
 
-      const data = await response.json();
+      const data: ApiRetryResponse = await response.json();
 
       if (data.success && result) {
         // Merge new results
-        const newProcessed: ProcessedFile[] = data.retried_processed.map((item: any) => ({
+        const newProcessed: ProcessedFile[] = data.retried_processed.map((item) => ({
           originalName: item.original_name,
           newName: item.new_name,
           success: true,
@@ -251,7 +304,7 @@ export function useProcessing() {
 
         // Retrying at a higher resolution can make an unreadable image readable
         // but still not trustworthy — those move into the review queue.
-        const newReview: ReviewFile[] = (data.retried_review ?? []).map((item: any) => ({
+        const newReview: ReviewFile[] = (data.retried_review ?? []).map((item) => ({
           originalName: item.original_name,
           storedName: item.stored_name,
           suggestedCode: item.suggested_code,
@@ -316,7 +369,7 @@ export function useProcessing() {
         }
       );
       if (!response.ok) return false;
-      const data = await response.json();
+      const data: ApiConfirmResponse = await response.json();
 
       const confirmed = result.reviewFiles.find(f => f.storedName === storedName);
       const remainingReview = result.reviewFiles.filter(f => f.storedName !== storedName);
@@ -352,46 +405,6 @@ export function useProcessing() {
       return false;
     }
   }, [result]);
-
-  const simulateProcessing = useCallback(async (images: UploadedImage[]) => {
-    const processedFiles: ProcessedFile[] = [];
-    const failedFiles: FailedFile[] = [];
-
-    for (let i = 0; i < images.length; i++) {
-      setCurrentIndex(i + 1);
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Simulate 85% success rate
-      if (Math.random() > 0.15) {
-        processedFiles.push({
-          originalName: images[i].name,
-          newName: `VR${Math.floor(10000 + Math.random() * 90000)}.jpg`,
-          success: true,
-          preview: images[i].preview,
-        });
-      } else {
-        failedFiles.push({
-          originalName: images[i].name,
-        });
-      }
-    }
-
-    setResult({
-      stats: {
-        totalFiles: images.length,
-        processedFiles: processedFiles.length,
-        failedFiles: failedFiles.length,
-        reviewFiles: 0,
-        successRate: Math.round((processedFiles.length / images.length) * 100),
-      },
-      processedFiles,
-      failedFiles,
-      reviewFiles: [],
-    });
-
-    setState('results');
-    setError(null);
-  }, []);
 
   const cancelProcessing = useCallback(() => {
     if (abortControllerRef.current) {

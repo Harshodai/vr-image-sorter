@@ -35,3 +35,6 @@ temp_logs/
 .agent/
 # Serena MCP project state
 .serena/
+
+# diagnostic crops from test_barcode_accuracy.py
+backend/tests/debug_output/

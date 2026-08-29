@@ -135,7 +135,26 @@ memory, so extra workers silently lose chunks of large uploads.
 ---
 
 ## ✨ Features
-- 🧠 **AI-Powered**: Uses RapidOCR with orientation-detection for 99% accuracy on hand-held photos.
-- ⚡ **Optimized**: Early-exit logic ensures high-speed processing (scans only what is needed).
-- 🔒 **Secure**: Temporary processing sessions with HMAC-signed download links.
-- 📦 **Batch Processing**: Upload hundreds of images; get a clean ZIP back instantly.
+- 🧠 **Barcode first, OCR second**: Code128/QR decode is checksum-verified and fast;
+  RapidOCR handles the rest, reading all four orientations.
+- 🛑 **Never renames on a guess**: low-confidence, character-substituted or
+  conflicting reads go to a review queue keeping their original filename.
+- ⚡ **Early exit**: a clean high-confidence read stops the remaining passes, so
+  only hard images pay for the full sweep.
+- 🔒 **Secure**: temporary sessions with token-authenticated download links.
+- 📁 **Folder mode**: resumable, disk-based processing for backlogs the browser
+  cannot hold.
+
+### Measured, not claimed
+On the 22-image sample in this repo, on a 10-core host:
+
+| | |
+|---|---|
+| auto-renamed correctly | 22/22 |
+| wrong renames | 0 |
+| throughput | 2.03 img/s at pool=6 |
+| 100,000 images | ~13.7 h |
+
+That is 22 images. It is evidence the pipeline works, **not** proof of an
+accuracy rate at 100,000. Run `make test` against your own labelled set before
+trusting a number, and expect to tune `OCR_MIN_CONFIDENCE` when you do.

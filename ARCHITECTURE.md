@@ -21,13 +21,13 @@ sequenceDiagram
     Note over B: Create Session & Storage
     loop Each Image
         B->>B: Preprocess (OpenCV)
-        B->>B: Scan Barcode (ZBar)
+        B->>B: Scan Barcode (zxing-cpp)
         alt No Barcode
             B->>AI: Scan Text (RapidOCR)
         end
         B->>B: Rename & Organize
     end
-    B->>B: Package ZIPs
+    Note over B: ZIPs are built on demand at download
     B-->>F: Return Session Token & Results
     F->>U: Display Previews & Stats
     U->>F: Click Download
@@ -54,8 +54,16 @@ The repository is structured defensively to isolate the React frontend from the 
 *   **`validate_filename(filename)`**: Sanitizes input filenames by removing directory separators and non-standard characters to prevent **Path Traversal** attacks.
 *   **`cleanup_session(session_id)`**: Forcefully deletes the session's temporary directory and removes it from the global registry to free up server disk space.
 
-### 🧠 `SareeSorter` Class
-The primary engine for image intelligence.
+### 🧠 Scanner package (`backend/scanner/`)
+The `SareeSorter` class described below was refactored away; the pipeline now
+lives in `scanner/pipeline.py`, with strategies in `scanner/strategies/` and
+shared image helpers in `scanner/utils.py`. `process_pipeline(bytes)` returns a
+`ScanResult` (code, confidence, method, needs_review, candidates) rather than a
+bare string, so an untrusted read can be routed to review instead of renaming a
+file. Barcode decoding uses zxing-cpp, not pyzbar.
+
+The function-level notes that follow are historical and describe the removed
+class.
 *   **`preprocess_image(image, method)`**:
     *   `grayscale`: Converts to B&W to reduce noise.
     *   `threshold_otsu`: Automatically adjusts contrast for sharp, high-contrast text.

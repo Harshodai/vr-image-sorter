@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
-import { Upload, Image as ImageIcon } from 'lucide-react';
+import { Upload, Image as ImageIcon, Folder } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { MAX_BROWSER_IMAGES } from '@/hooks/useImageUpload';
 
 interface UploadZoneProps {
   onFilesSelected: (files: FileList | File[]) => void;
@@ -55,7 +56,20 @@ export function UploadZone({ onFilesSelected, disabled }: UploadZoneProps) {
         id="file-input"
         type="file"
         multiple
-        accept="image/jpeg,image/jpg,image/png"
+        accept="image/jpeg,image/jpg,image/png,image/webp"
+        className="hidden"
+        onChange={handleFileInput}
+        disabled={disabled}
+      />
+      {/* webkitdirectory selects a whole folder. Non-standard but supported in
+          every current browser, and it is how operators actually work. */}
+      <input
+        id="folder-input"
+        type="file"
+        // @ts-expect-error -- webkitdirectory is not in React's typings
+        webkitdirectory=""
+        directory=""
+        multiple
         className="hidden"
         onChange={handleFileInput}
         disabled={disabled}
@@ -75,9 +89,29 @@ export function UploadZone({ onFilesSelected, disabled }: UploadZoneProps) {
           </p>
         </div>
         
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <ImageIcon className="w-4 h-4" />
-          <span>Supports JPG, JPEG, PNG</span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-2"
+          disabled={disabled}
+          onClick={(e) => {
+            e.stopPropagation();
+            document.getElementById('folder-input')?.click();
+          }}
+        >
+          <Folder className="w-4 h-4" />
+          Select a whole folder
+        </Button>
+
+        <div className="flex flex-col items-center gap-1 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <ImageIcon className="w-4 h-4" />
+            <span>Supports JPG, JPEG, PNG, WebP</span>
+          </div>
+          <span>
+            Up to {MAX_BROWSER_IMAGES.toLocaleString()} images here — for a bigger backlog
+            use folder mode from the terminal
+          </span>
         </div>
       </div>
     </div>

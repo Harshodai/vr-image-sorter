@@ -1,50 +1,60 @@
+"""
+Run one image through the production pipeline with DEBUG logging on, so you can
+see which stage found the code (or why nothing did).
+
+    python debug_failed_image.py                       # defaults to test_user_image.jpg
+    python debug_failed_image.py some_photo.jpeg       # a name inside tests/sandbox
+    python debug_failed_image.py /full/path/to/img.jpg
+"""
+import logging
 import os
 import sys
-import io
 import time
-import logging
-import cv2
 
-# Fix unicode characters crashing windows terminals
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-
-# Route backend modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from scanner.engine_pool import ocr_pool
-from scanner.pipeline import process_pipeline
-from core.logger import logger
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
-logger.setLevel(logging.DEBUG)
+from scanner.pipeline import process_pipeline  # noqa: E402
 
-def debug_image(filename: str):
-    filepath = os.path.join(r"C:\Users\khars\PycharmProjects\vr-image-sorter\tests\sandbox", filename)
-    
+SANDBOX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "sandbox")
+
+
+def debug_image(filename: str) -> int:
+    # Accept either a bare name inside tests/sandbox or a full path, so this
+    # works on whatever machine it is run from.
+    filepath = filename if os.path.isabs(filename) else os.path.join(SANDBOX_DIR, filename)
     if not os.path.exists(filepath):
-        print(f"Error: Could not find '{filepath}'")
-        return
-
-    print(f"Scanning image: {filepath}")
-    print("-" * 60)
-
-    # Initialize pooling to mimic pipeline state
-    ocr_pool.initialize()
+        print(f"Error: could not find {filepath!r}")
+        print(f"Available in {SANDBOX_DIR}:")
+        for f in sorted(os.listdir(SANDBOX_DIR))[:20]:
+            print(f"  {f}")
+        return 1
 
     with open(filepath, "rb") as f:
         image_bytes = f.read()
 
-    # Track time and execution
-    t_start = time.time()
-    
-    # Process through exact production pipeline (with logging turned up to DEBUG)
+    t_start = time.monotonic()
     result = process_pipeline(image_bytes)
-    
-    t_end = time.time()
-    print(f"\n--> Final Output: {result}")
-    print(f"--> Extracted in: {t_end - t_start:.2f}s")
+    elapsed = time.monotonic() - t_start
+
+    print(f"\n--> Code       : {result.code}")
+    print(f"--> Confidence : {result.confidence:.4f}")
+    print(f"--> Method     : {result.method}")
+    print(f"--> Auto-rename: {result.is_confident}")
+    print(f"--> Reason     : {result.reason}")
+    if result.candidates:
+        print("--> Candidates :")
+        for c in result.candidates:
+            print(f"      {c.code:<12} {c.confidence:.4f}  {c.source} rot{c.rotation}"
+                  f"{'  (substituted)' if c.substituted else ''}")
+    print(f"--> Elapsed    : {elapsed:.2f}s")
+    return 0
 
 
 if __name__ == "__main__":
-    # You can target any exact failing image here:
-    target_image = "test_user_image.jpg"
-    debug_image(target_image)
+    target = sys.argv[1] if len(sys.argv) > 1 else "test_user_image.jpg"
+    raise SystemExit(debug_image(target))

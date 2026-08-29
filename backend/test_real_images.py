@@ -79,23 +79,36 @@ def run_tests():
         t_scan = time.time() - t_start
         total_time += t_scan
 
-        standardized = standardize_filename(result) if result else None
-        match = standardized == expected_vr
+        standardized = standardize_filename(result.code) if result.code else None
+        # Only an automatic rename counts as a pass. A correct-but-untrusted read
+        # is reported separately: it does not rename anything on its own.
+        match = standardized == expected_vr and result.is_confident
 
         if match: passed += 1
-        
-        icon = "PASS" if match else "FAIL"
+
+        if match:
+            icon = "PASS"
+        elif standardized == expected_vr:
+            icon = "REVIEW"
+        elif standardized:
+            icon = "WRONG"
+        else:
+            icon = "FAIL"
         got = standardized or "--"
-        print(f"  {filename[:40]:<42} {expected_vr:<12} {got:<12} {icon:<6} {t_scan:>7.2f}s")
-        
-        results.append({"file": filename, "expected": expected_vr, "got": got, "match": match})
+        print(f"  {filename[:40]:<42} {expected_vr:<12} {got:<12} {icon:<6} {t_scan:>7.2f}s"
+              f"  {result.reason}")
+
+        results.append({"file": filename, "expected": expected_vr, "got": got, "match": match,
+                        "confident": result.is_confident, "confidence": result.confidence})
         gc.collect()
 
     mem_after = get_memory_mb()
     total = len(results)
     accuracy = (passed / total * 100) if total > 0 else 0
 
-    print(f"\n  Pipeline Accuracy: {accuracy:.0f}% ({passed}/{total})")
+    wrong = sum(1 for r in results if r["got"] != "--" and r["got"] != r["expected"])
+    print(f"\n  Auto-renamed correctly: {accuracy:.0f}% ({passed}/{total})")
+    print(f"  Wrong renames: {wrong}   <- the number that actually matters")
     print(f"  Total time: {total_time:.2f}s (avg {total_time/max(total,1):.2f}s/image)")
     print(f"  Final Memory: {mem_after:.0f}MB")
 

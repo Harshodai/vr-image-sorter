@@ -1,6 +1,7 @@
 import { X, Maximize2 } from 'lucide-react';
 import { useState } from 'react';
 import { UploadedImage } from '@/types';
+import { PREVIEW_LIMIT } from '@/hooks/useImageUpload';
 import { Button } from '@/components/ui/button';
 import { ImageLightbox } from './ImageLightbox';
 
@@ -27,17 +28,23 @@ export function ImagePreviewGrid({ images, onRemove }: ImagePreviewGridProps) {
         </div>
         
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-          {images.map((image) => (
+          {images.slice(0, PREVIEW_LIMIT).map((image) => (
             <div
               key={image.id}
               className="relative group aspect-square rounded-lg overflow-hidden bg-muted border border-border animate-scale-in cursor-pointer"
-              onClick={() => setLightboxImage(image)}
+              onClick={() => image.preview && setLightboxImage(image)}
             >
-              <img
-                src={image.preview}
-                alt={image.name}
-                className="w-full h-full object-cover"
-              />
+              {image.preview ? (
+                <img
+                  src={image.preview}
+                  alt={image.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-xs text-muted-foreground">
+                  no preview
+                </div>
+              )}
               
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
               
@@ -66,6 +73,13 @@ export function ImagePreviewGrid({ images, onRemove }: ImagePreviewGridProps) {
           ))}
         </div>
       </div>
+
+      {images.length > PREVIEW_LIMIT && (
+          <p className="mt-4 text-sm text-muted-foreground">
+            Showing the first {PREVIEW_LIMIT} of {images.length.toLocaleString()}. All of them
+            will be processed — previews are capped to keep the page responsive.
+          </p>
+        )}
 
       {lightboxImage && (
         <ImageLightbox

@@ -45,7 +45,7 @@ export function ResultsView({ result, onReset, onRetry, onConfirmReview }: Resul
         setDownloadingSuccess(false);
       }
     } else {
-      toast.info('Demo mode: Connect to backend for actual ZIP download.');
+      toast.error('No download available for this session. It may have expired — reprocess the images.');
     }
   };
 
@@ -72,7 +72,7 @@ export function ResultsView({ result, onReset, onRetry, onConfirmReview }: Resul
         setDownloadingFailed(false);
       }
     } else {
-      toast.info('Demo mode: Connect to backend for actual ZIP download.');
+      toast.error('No download available for this session. It may have expired — reprocess the images.');
     }
   };
 
