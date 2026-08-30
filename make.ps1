@@ -166,7 +166,7 @@ switch ($Target.ToLower()) {
 
     'sort' {
         if (-not $IN -or -not $OUT) {
-            throw "Usage: .\make.cmd sort -IN <photos_dir> -OUT <sorted_dir>"
+            throw 'Usage: .\make.cmd sort -IN <photos_dir> -OUT <sorted_dir>'
         }
         $env:APP_ENV = 'development'
         $env:OMP_NUM_THREADS = '1'
@@ -182,7 +182,7 @@ switch ($Target.ToLower()) {
 
     'resume' {
         if (-not $IN -or -not $OUT) {
-            throw "Usage: .\make.cmd resume -IN <photos_dir> -OUT <sorted_dir>"
+            throw 'Usage: .\make.cmd resume -IN <photos_dir> -OUT <sorted_dir>'
         }
         $env:APP_ENV = 'development'
         $env:OMP_NUM_THREADS = '1'
@@ -198,7 +198,7 @@ switch ($Target.ToLower()) {
 
     'watch' {
         if (-not $IN -or -not $OUT) {
-            throw "Usage: .\make.cmd watch -IN <dropbox_dir> -OUT <sorted_dir>"
+            throw 'Usage: .\make.cmd watch -IN <dropbox_dir> -OUT <sorted_dir>'
         }
         $env:APP_ENV = 'development'
         $env:OMP_NUM_THREADS = '1'
@@ -214,7 +214,7 @@ switch ($Target.ToLower()) {
 
     'apply' {
         if (-not $OUT) {
-            throw "Usage: .\make.cmd apply -OUT <sorted_dir>"
+            throw 'Usage: .\make.cmd apply -OUT <sorted_dir>'
         }
         $env:APP_ENV = 'development'
         $outPath = (Resolve-Path $OUT).Path
@@ -254,7 +254,7 @@ switch ($Target.ToLower()) {
     'bench' {
         $env:APP_ENV = 'development'
         Push-Location (Join-Path $Root 'backend')
-        $benchScript = @'
+        $benchPy = @'
 import sys, glob, time
 sys.path.insert(0, '.')
 from scanner.pipeline import process_pipeline as p
@@ -266,9 +266,12 @@ total = max(len(fs), 1)
 hits = sum(1 for x in r if x and x.code)
 print(f"{len(fs)} imgs in {d:.2f}s ({d/total:.2f}s/img) - hits={hits}/{len(fs)}")
 '@
+        $tmpPy = Join-Path $env:TEMP 'bench_sort.py'
+        $benchPy | Out-File -FilePath $tmpPy -Encoding utf8 -NoNewline
         try {
-            & $VPy -c $benchScript
+            & $VPy $tmpPy
         } finally {
+            Remove-Item $tmpPy -ErrorAction SilentlyContinue
             Pop-Location
         }
     }

@@ -10,6 +10,7 @@ import hashlib
 import tempfile
 import asyncio
 import secrets
+import threading
 import concurrent.futures
 import logging
 from typing import List, Optional
@@ -95,6 +96,21 @@ def _purge_expired_download_tokens() -> None:
         _download_tokens.pop(t, None)
 
 # ---------------------------------------------------------------------------
+# Per-session synchronization locks
+# ---------------------------------------------------------------------------
+_session_locks: dict[str, threading.Lock] = {}
+_session_locks_guard = threading.Lock()
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    """Retrieve or create a threading lock for serializing per-session critical sections."""
+    with _session_locks_guard:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
+
+# ---------------------------------------------------------------------------
 # Session cleanup — rate-gated to avoid scanning all sessions on every request
 # ---------------------------------------------------------------------------
 _last_cleanup_time: float = 0.0
@@ -113,6 +129,8 @@ def _maybe_cleanup_expired_sessions() -> None:
 
 def cleanup_session(session_id: str):
     session = temp_dirs.pop(session_id, None)
+    with _session_locks_guard:
+        _session_locks.pop(session_id, None)
     if session:
         try:
             shutil.rmtree(session["path"], ignore_errors=True)
@@ -443,11 +461,14 @@ async def download_zip(
             raise HTTPException(status_code=404, detail="No files to zip")
         await run_in_threadpool(_build_zip_atomically, zip_path, output_dir)
 
-    if dl_token:
-        if not _consume_download_token(dl_token, session_id):
-            raise HTTPException(status_code=403, detail="Invalid or expired download token")
-    session["download_count"] += 1
-    await run_in_threadpool(save_session_metadata, session_id, session)
+    with _get_session_lock(session_id):
+        if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+            raise HTTPException(status_code=429, detail="Download limit exceeded")
+        if dl_token:
+            if not _consume_download_token(dl_token, session_id):
+                raise HTTPException(status_code=403, detail="Invalid or expired download token")
+        session["download_count"] += 1
+        save_session_metadata(session_id, session)
 
     return FileResponse(str(zip_path), filename="saree_organized.zip", media_type="application/zip")
 
@@ -492,11 +513,14 @@ async def download_failed_zip(
             raise HTTPException(status_code=404, detail="No failed files to zip")
         await run_in_threadpool(_build_zip_atomically, zip_path, failed_dir)
 
-    if dl_token:
-        if not _consume_download_token(dl_token, session_id):
-            raise HTTPException(status_code=403, detail="Invalid or expired download token")
-    session["download_count"] += 1
-    await run_in_threadpool(save_session_metadata, session_id, session)
+    with _get_session_lock(session_id):
+        if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+            raise HTTPException(status_code=429, detail="Download limit exceeded")
+        if dl_token:
+            if not _consume_download_token(dl_token, session_id):
+                raise HTTPException(status_code=403, detail="Invalid or expired download token")
+        session["download_count"] += 1
+        save_session_metadata(session_id, session)
 
     return FileResponse(str(zip_path), filename="failed_images.zip", media_type="application/zip")
 

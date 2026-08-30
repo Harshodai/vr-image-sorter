@@ -6,6 +6,7 @@ Verifies:
 2. Exactly 1 concurrent request succeeds (200), and all other concurrent requests are rejected (403).
 3. Session download_count is incremented strictly once.
 4. Expired tokens are rejected (403) before modifying session download_count.
+5. Concurrent requests using two distinct tokens for one session enforce quota limit (only 1 succeeds, other rejected with 429).
 """
 import os
 import sys
@@ -158,6 +159,137 @@ def test_expired_token_rejected_before_count():
         loop.close()
 
 
+def test_concurrent_two_tokens_quota_limit():
+    """Verify that when a session has quota for only 1 remaining download,
+    two concurrent requests using distinct valid tokens result in exactly
+    1 success (200) and 1 rejection (429 Download limit exceeded), and the
+    session download_count is strictly incremented once without exceeding the limit.
+    """
+    print("\n[4/4] Testing concurrent requests with two distinct tokens at quota limit...")
+    from core.config import MAX_DOWNLOADS_PER_SESSION
+    session_id, base_dir = setup_mock_session()
+
+    # Configure session so exactly 1 download remains before hitting MAX_DOWNLOADS_PER_SESSION
+    session_data = temp_dirs[session_id]
+    session_data["download_count"] = MAX_DOWNLOADS_PER_SESSION - 1
+    save_session_metadata(session_id, session_data)
+
+    token1 = _issue_download_token(session_id)
+    token2 = _issue_download_token(session_id)
+
+    results = []
+    errors = []
+
+    async def call_download(tok: str):
+        bg = BackgroundTasks()
+        try:
+            resp = await download_zip(session_id=session_id, background_tasks=bg, dl_token=tok)
+            return ("SUCCESS", resp)
+        except HTTPException as e:
+            return ("HTTPException", e.status_code, e.detail)
+        except Exception as e:
+            return ("ERROR", str(e))
+
+    def worker(tok: str):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(call_download(tok))
+        finally:
+            loop.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(worker, t) for t in (token1, token2)]
+        for f in futures:
+            res = f.result()
+            if res[0] == "SUCCESS":
+                results.append(res[1])
+            elif res[0] == "HTTPException":
+                errors.append((res[1], res[2]))
+            else:
+                raise RuntimeError(f"Unexpected worker failure: {res[1]}")
+
+    session = temp_dirs.get(session_id)
+    print(f"      Success responses: {len(results)}")
+    print(f"      HTTP errors: {errors}")
+    print(f"      Session download_count: {session['download_count']}")
+
+    assert len(results) == 1, f"Expected exactly 1 successful FileResponse, got {len(results)}"
+    assert len(errors) == 1, f"Expected exactly 1 HTTPException, got {len(errors)}"
+    status_code, detail = errors[0]
+    assert status_code == 429, f"Expected 429 Download limit exceeded, got {status_code}"
+    assert detail == "Download limit exceeded", f"Expected 'Download limit exceeded', got {detail}"
+    assert session["download_count"] == MAX_DOWNLOADS_PER_SESSION, (
+        f"Expected session download_count == {MAX_DOWNLOADS_PER_SESSION}, got {session['download_count']}"
+    )
+    print("      ✅ PASS: Exactly 1 permitted request succeeded; concurrent second token rejected with 429.")
+
+
+def test_concurrent_two_tokens_failed_zip_quota_limit():
+    """Verify that when a session has quota for only 1 remaining download,
+    two concurrent requests to download_failed_zip using distinct valid tokens result in
+    exactly 1 success (200) and 1 rejection (429 Download limit exceeded), and the
+    session download_count is strictly incremented once.
+    """
+    print("\n[5/5] Testing concurrent requests with two distinct tokens on download-failed endpoint at quota limit...")
+    from core.config import MAX_DOWNLOADS_PER_SESSION
+    session_id, base_dir = setup_mock_session()
+
+    session_data = temp_dirs[session_id]
+    session_data["download_count"] = MAX_DOWNLOADS_PER_SESSION - 1
+    save_session_metadata(session_id, session_data)
+
+    token1 = _issue_download_token(session_id)
+    token2 = _issue_download_token(session_id)
+
+    results = []
+    errors = []
+
+    async def call_download(tok: str):
+        bg = BackgroundTasks()
+        try:
+            resp = await download_failed_zip(session_id=session_id, background_tasks=bg, dl_token=tok)
+            return ("SUCCESS", resp)
+        except HTTPException as e:
+            return ("HTTPException", e.status_code, e.detail)
+        except Exception as e:
+            return ("ERROR", str(e))
+
+    def worker(tok: str):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(call_download(tok))
+        finally:
+            loop.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(worker, t) for t in (token1, token2)]
+        for f in futures:
+            res = f.result()
+            if res[0] == "SUCCESS":
+                results.append(res[1])
+            elif res[0] == "HTTPException":
+                errors.append((res[1], res[2]))
+            else:
+                raise RuntimeError(f"Unexpected worker failure: {res[1]}")
+
+    session = temp_dirs.get(session_id)
+    print(f"      Success responses: {len(results)}")
+    print(f"      HTTP errors: {errors}")
+    print(f"      Session download_count: {session['download_count']}")
+
+    assert len(results) == 1, f"Expected exactly 1 successful FileResponse, got {len(results)}"
+    assert len(errors) == 1, f"Expected exactly 1 HTTPException, got {len(errors)}"
+    status_code, detail = errors[0]
+    assert status_code == 429, f"Expected 429 Download limit exceeded, got {status_code}"
+    assert detail == "Download limit exceeded", f"Expected 'Download limit exceeded', got {detail}"
+    assert session["download_count"] == MAX_DOWNLOADS_PER_SESSION, (
+        f"Expected session download_count == {MAX_DOWNLOADS_PER_SESSION}, got {session['download_count']}"
+    )
+    print("      ✅ PASS: Exactly 1 permitted request succeeded; concurrent second token rejected with 429.")
+
+
 def main():
     print("=" * 70)
     print("  RUNNING DOWNLOAD TOKEN CONCURRENCY REGRESSION SUITE")
@@ -165,9 +297,12 @@ def main():
     test_concurrent_token_consumption()
     test_concurrent_download_endpoint()
     test_expired_token_rejected_before_count()
+    test_concurrent_two_tokens_quota_limit()
+    test_concurrent_two_tokens_failed_zip_quota_limit()
     print("\n" + "=" * 70)
     print("  >>> ALL DOWNLOAD TOKEN CONCURRENCY TESTS PASSED! <<<")
     print("=" * 70 + "\n")
+
 
 if __name__ == "__main__":
     main()
