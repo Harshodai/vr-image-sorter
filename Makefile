@@ -112,10 +112,7 @@ test-all: ## Master benchmark across all 124+ images in all datasets
 	cd backend && APP_ENV=development ../$(VENV)/bin/python test_all_datasets.py
 
 bench: ## Timing on ./input
-	@cd backend && ../$(VENV)/bin/python -c "import sys,glob,time; sys.path.insert(0,'.'); \
-from scanner.pipeline import process_pipeline as p; \
-fs=sorted(glob.glob('../input/*')); t=time.monotonic(); r=[p(open(f,'rb').read()) for f in fs]; \
-d=time.monotonic()-t; print(f'{len(fs)} imgs {d:.1f}s  {d/len(fs):.2f}s/img  hits={sum(1 for x in r if x)}/{len(fs)}')"
+	cd backend && APP_ENV=development ../$(VENV)/bin/python bench.py
 
 ## ---------- packaging ----------
 

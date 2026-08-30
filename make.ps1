@@ -35,7 +35,8 @@ function Resolve-Python {
     foreach ($c in @('python', 'python3', 'py')) {
         if (Have $c) {
             $v = & $c --version 2>&1
-            if ($v -match 'Python 3\.(\d+)' -and [int]$Matches[1] -ge 9) { return $c }
+            $vStr = ("$v" | Out-String)
+            if ($vStr -match 'Python 3\.(\d+)' -and [int]$Matches[1] -ge 9) { return $c }
         }
     }
     throw "Python 3.9+ not found. Install from https://python.org and re-open the terminal."
@@ -47,7 +48,7 @@ function Setup-Backend {
         Write-Host "==> uv detected: fast install" -ForegroundColor Cyan
         & uv venv $Venv --python $py --allow-existing
         $env:VIRTUAL_ENV = $Venv
-        & uv pip install -r (Join-Path $Root 'backend\requirements.txt')
+        & uv pip install --python $VPy -r (Join-Path $Root 'backend\requirements.txt')
     } else {
         Write-Host "==> uv not found, using pip (slower). Install uv: winget install astral-sh.uv" -ForegroundColor Yellow
         if (-not (Test-Path $VPy)) { & $py -m venv $Venv }
@@ -67,9 +68,12 @@ function Setup-Frontend {
     if (-not (Have 'npm')) { throw "Node.js/npm not found. Install Node 20+ from https://nodejs.org" }
     Push-Location $Root
     try {
-        npm ci --prefer-offline --no-audit --fund=false
-        if ($LASTEXITCODE -ne 0) { npm install --no-audit --fund=false }
+        $oldEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & npm ci --prefer-offline --no-audit --fund=false
+        if ($LASTEXITCODE -ne 0) { & npm install --no-audit --fund=false }
     } finally {
+        $ErrorActionPreference = $oldEap
         Pop-Location
     }
 }
@@ -170,11 +174,16 @@ switch ($Target.ToLower()) {
         }
         $env:APP_ENV = 'development'
         $env:OMP_NUM_THREADS = '1'
-        $inPath = (Resolve-Path $IN).Path
-        $outPath = if (Test-Path $OUT) { (Resolve-Path $OUT).Path } else { $OUT }
+        $inPath = [System.IO.Path]::GetFullPath($IN)
+        $outPath = [System.IO.Path]::GetFullPath($OUT)
         Push-Location (Join-Path $Root 'backend')
         try {
-            & $VPy cli.py sort --input $inPath --output $outPath $SORT_ARGS
+            $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
+            if ($extra.Count -gt 0) {
+                & $VPy cli.py sort --input $inPath --output $outPath @extra
+            } else {
+                & $VPy cli.py sort --input $inPath --output $outPath
+            }
         } finally {
             Pop-Location
         }
@@ -186,11 +195,16 @@ switch ($Target.ToLower()) {
         }
         $env:APP_ENV = 'development'
         $env:OMP_NUM_THREADS = '1'
-        $inPath = (Resolve-Path $IN).Path
-        $outPath = (Resolve-Path $OUT).Path
+        $inPath = [System.IO.Path]::GetFullPath($IN)
+        $outPath = [System.IO.Path]::GetFullPath($OUT)
         Push-Location (Join-Path $Root 'backend')
         try {
-            & $VPy cli.py sort --input $inPath --output $outPath --resume $SORT_ARGS
+            $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
+            if ($extra.Count -gt 0) {
+                & $VPy cli.py sort --input $inPath --output $outPath --resume @extra
+            } else {
+                & $VPy cli.py sort --input $inPath --output $outPath --resume
+            }
         } finally {
             Pop-Location
         }
@@ -202,11 +216,16 @@ switch ($Target.ToLower()) {
         }
         $env:APP_ENV = 'development'
         $env:OMP_NUM_THREADS = '1'
-        $inPath = (Resolve-Path $IN).Path
-        $outPath = if (Test-Path $OUT) { (Resolve-Path $OUT).Path } else { $OUT }
+        $inPath = [System.IO.Path]::GetFullPath($IN)
+        $outPath = [System.IO.Path]::GetFullPath($OUT)
         Push-Location (Join-Path $Root 'backend')
         try {
-            & $VPy cli.py watch --input $inPath --output $outPath $SORT_ARGS
+            $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
+            if ($extra.Count -gt 0) {
+                & $VPy cli.py watch --input $inPath --output $outPath @extra
+            } else {
+                & $VPy cli.py watch --input $inPath --output $outPath
+            }
         } finally {
             Pop-Location
         }
@@ -217,8 +236,8 @@ switch ($Target.ToLower()) {
             throw 'Usage: .\make.cmd apply -OUT <sorted_dir>'
         }
         $env:APP_ENV = 'development'
-        $outPath = (Resolve-Path $OUT).Path
-        $csvPath = if ($CSV) { (Resolve-Path $CSV).Path } else { Join-Path $outPath 'review.csv' }
+        $outPath = [System.IO.Path]::GetFullPath($OUT)
+        $csvPath = if ($CSV) { [System.IO.Path]::GetFullPath($CSV) } else { Join-Path $outPath 'review.csv' }
         Push-Location (Join-Path $Root 'backend')
         try {
             & $VPy cli.py apply --csv $csvPath --output $outPath
@@ -254,26 +273,7 @@ switch ($Target.ToLower()) {
     'bench' {
         $env:APP_ENV = 'development'
         Push-Location (Join-Path $Root 'backend')
-        $benchPy = @'
-import sys, glob, time
-sys.path.insert(0, '.')
-from scanner.pipeline import process_pipeline as p
-fs = sorted(glob.glob('../input/*'))
-t = time.monotonic()
-r = [p(open(f, 'rb').read()) for f in fs]
-d = time.monotonic() - t
-total = max(len(fs), 1)
-hits = sum(1 for x in r if x and x.code)
-print(f"{len(fs)} imgs in {d:.2f}s ({d/total:.2f}s/img) - hits={hits}/{len(fs)}")
-'@
-        $tmpPy = Join-Path $env:TEMP 'bench_sort.py'
-        $benchPy | Out-File -FilePath $tmpPy -Encoding utf8 -NoNewline
-        try {
-            & $VPy $tmpPy
-        } finally {
-            Remove-Item $tmpPy -ErrorAction SilentlyContinue
-            Pop-Location
-        }
+        try { & $VPy bench.py } finally { Pop-Location }
     }
 
     'dist' {
@@ -282,13 +282,24 @@ print(f"{len(fs)} imgs in {d:.2f}s ({d/total:.2f}s/img) - hits={hits}/{len(fs)}"
         $zip = Join-Path $out 'vr-image-sorter.zip'
         Remove-Item $zip -ErrorAction SilentlyContinue
         Push-Location $Root
-        try { git archive --format=zip -o $zip HEAD } finally { Pop-Location }
-        Write-Host "wrote $zip"
+        try {
+            if (Have 'git') {
+                git archive --format=zip -o $zip HEAD
+                Write-Host "wrote $zip"
+            } else {
+                Compress-Archive -Path (Get-ChildItem -Path $Root -Exclude @('.git', 'node_modules', 'dist', '.venv')) -DestinationPath $zip
+                Write-Host "wrote $zip"
+            }
+        } finally {
+            Pop-Location
+        }
     }
 
     'clean' {
-        foreach ($p in @($Venv, (Join-Path $Root 'node_modules'), (Join-Path $Root 'dist'))) {
-            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        foreach ($p in @($Venv, (Join-Path $Root 'node_modules'), (Join-Path $Root 'dist'), (Join-Path $Root 'backend\__pycache__'), (Join-Path $Root '__pycache__'))) {
+            if (Test-Path $p) {
+                Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
         }
     }
 
