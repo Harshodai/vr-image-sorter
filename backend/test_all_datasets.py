@@ -32,6 +32,7 @@ def main():
     grand_total = 0
     grand_passed = 0      # confident AND correct (matches ground truth when available)
     grand_wrong = 0       # confident BUT incorrect code (wrong rename would have occurred)
+    grand_unverified = 0  # confident BUT ground truth is None (cannot verify correctness)
     grand_review = 0      # detected but sent to review
     grand_time = 0.0
     skipped_datasets = []
@@ -62,6 +63,7 @@ def main():
         print(f"\n--- {name}: {len(images)} images in {directory} ---")
         ds_passed = 0
         ds_wrong = 0
+        ds_unverified = 0
         ds_time = 0.0
 
         for i, filename in enumerate(images, 1):
@@ -80,9 +82,9 @@ def main():
 
                 if res.is_confident:
                     if ground_truth is None:
-                        # No ground truth in filename — count as passed (no correctness check)
-                        status = "PASS"
-                        ds_passed += 1
+                        # No ground truth in filename — mark as UNVERIFIED (cannot verify correctness)
+                        status = "UNVERIFIED"
+                        ds_unverified += 1
                     elif predicted == ground_truth:
                         status = "PASS"
                         ds_passed += 1
@@ -97,7 +99,7 @@ def main():
 
                 code_str = predicted or "--"
                 gt_label = f" (GT:{ground_truth})" if ground_truth and status == "WRONG" else ""
-                print(f"  [{i:3d}/{len(images):3d}] {filename[:36]:<38} -> {code_str:<10}{gt_label} ({status:<6}) {elapsed:>5.2f}s [{res.method}]")
+                print(f"  [{i:3d}/{len(images):3d}] {filename[:36]:<38} -> {code_str:<10}{gt_label} ({status:<10}) {elapsed:>5.2f}s [{res.method}]")
             except Exception as e:
                 elapsed = time.time() - t0
                 ds_time += elapsed
@@ -106,8 +108,9 @@ def main():
         grand_total += len(images)
         grand_passed += ds_passed
         grand_wrong += ds_wrong
+        grand_unverified += ds_unverified
         grand_time += ds_time
-        print(f"  --> {name} Result: {ds_passed}/{len(images)} correct, {ds_wrong} wrong, in {ds_time:.2f}s (avg {ds_time/max(len(images),1):.2f}s/img)")
+        print(f"  --> {name} Result: {ds_passed}/{len(images)} correct, {ds_wrong} wrong, {ds_unverified} unverified, in {ds_time:.2f}s (avg {ds_time/max(len(images),1):.2f}s/img)")
 
     print("\n" + "=" * 90)
     print("  GRAND MASTER BENCHMARK SUMMARY")
@@ -121,6 +124,8 @@ def main():
     print(f"  Total Images Tested    : {grand_total}")
     if grand_total > 0:
         print(f"  Passed / Correct       : {grand_passed}/{grand_total} ({grand_passed/grand_total*100:.1f}%)")
+        if grand_unverified > 0:
+            print(f"  Unverified (no GT)     : {grand_unverified}/{grand_total} ({grand_unverified/grand_total*100:.1f}%)")
         if grand_wrong > 0:
             print(f"  *** WRONG (bad rename) : {grand_wrong}/{grand_total} ({grand_wrong/grand_total*100:.1f}%) ***")
     else:
@@ -130,13 +135,14 @@ def main():
     print(f"  Throughput             : {grand_total/max(grand_time,0.001):.2f} images/second")
     print("=" * 90)
 
-    # Perfect accuracy requires: all datasets present, all images correct, zero wrong renames.
+    # Perfect accuracy requires: all datasets present, all images correct, zero wrong renames, zero unverified.
     is_perfect = (
         grand_total > 0 and
         len(skipped_datasets) == 0 and
         len(empty_datasets) == 0 and
         grand_passed == grand_total and
-        grand_wrong == 0
+        grand_wrong == 0 and
+        grand_unverified == 0
     )
 
     if is_perfect:
@@ -151,8 +157,10 @@ def main():
             reasons.append(f"{len(empty_datasets)} dataset(s) empty")
         if grand_wrong > 0:
             reasons.append(f"{grand_wrong} image(s) produced an incorrect confident rename")
-        if grand_passed < grand_total - grand_wrong:
-            reasons.append(f"{grand_total - grand_passed - grand_wrong} image(s) failed or require review")
+        if grand_unverified > 0:
+            reasons.append(f"{grand_unverified} image(s) unverified (no ground truth in filename)")
+        if grand_passed < grand_total - grand_wrong - grand_unverified:
+            reasons.append(f"{grand_total - grand_passed - grand_wrong - grand_unverified} image(s) failed or require review")
         print(f"\n  Notice: Benchmark did not achieve full perfect coverage ({'; '.join(reasons)}).\n")
 
 if __name__ == "__main__":

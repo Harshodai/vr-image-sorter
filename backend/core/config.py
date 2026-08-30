@@ -1,3 +1,4 @@
+import math
 import os
 from typing import List
 
@@ -62,6 +63,12 @@ OCR_MIN_CONFIDENCE = float(os.environ.get("OCR_MIN_CONFIDENCE", 0.88))
 # acceptance floor continue through remaining rotations/sources, allowing
 # multi-candidate aggregation and settlement ranking to complete.
 OCR_EARLY_EXIT_CONFIDENCE = float(os.environ.get("OCR_EARLY_EXIT_CONFIDENCE", 0.95))
+if not math.isfinite(OCR_MIN_CONFIDENCE) or not math.isfinite(OCR_EARLY_EXIT_CONFIDENCE):
+    raise ValueError(
+        f"OCR confidence thresholds must be finite numbers: "
+        f"OCR_MIN_CONFIDENCE={OCR_MIN_CONFIDENCE}, "
+        f"OCR_EARLY_EXIT_CONFIDENCE={OCR_EARLY_EXIT_CONFIDENCE}."
+    )
 if OCR_EARLY_EXIT_CONFIDENCE <= OCR_MIN_CONFIDENCE:
     raise ValueError(
         f"OCR_EARLY_EXIT_CONFIDENCE ({OCR_EARLY_EXIT_CONFIDENCE}) must be strictly "

@@ -63,8 +63,8 @@ def _issue_download_token(session_id: str) -> str:
     }
     return token
 
-def _consume_download_token(token: str, session_id: str) -> bool:
-    """Validate and consume (delete) a download token. Returns True on success."""
+def _peek_download_token(token: str, session_id: str) -> bool:
+    """Validate a download token without consuming it. Returns True if valid."""
     _purge_expired_download_tokens()
     entry = _download_tokens.get(token)
     if not entry:
@@ -74,7 +74,18 @@ def _consume_download_token(token: str, session_id: str) -> bool:
     if time.monotonic() > entry["expires_at"]:
         _download_tokens.pop(token, None)
         return False
-    _download_tokens.pop(token, None)  # single-use: consume immediately
+    return True
+
+def _consume_download_token(token: str, session_id: str) -> bool:
+    """Validate and consume (delete) a download token. Returns True on success."""
+    _purge_expired_download_tokens()
+    entry = _download_tokens.pop(token, None)
+    if not entry:
+        return False
+    if entry["session_id"] != session_id:
+        return False
+    if time.monotonic() > entry["expires_at"]:
+        return False
     return True
 
 def _purge_expired_download_tokens() -> None:
@@ -186,9 +197,28 @@ async def process_images(
     if len(files) == 0:
         raise HTTPException(status_code=400, detail="No files provided")
 
+    is_new_session = False
+    if session_id and isinstance(session_id, str):
+        validate_session_id(session_id)
+        # Require authentication before accessing or appending to an existing session
+        auth = authorization if isinstance(authorization, str) else None
+        session = validate_session_token(session_id, auth, allow_preview=False)
+        temp_dir = session["path"]
+        session_token = None  # Frontend already has token from initial session creation
+    else:
+        is_new_session = True
+        session_id = str(uuid.uuid4())
+        base_dir = "temp_logs" if os.path.exists("temp_logs") else ("/app/temp_logs" if os.path.exists("/app/temp_logs") else tempfile.gettempdir())
+        temp_dir = os.path.join(base_dir, session_id)
+    output_dir = os.path.join(temp_dir, "output")
+    failed_dir = os.path.join(temp_dir, "failed")
+    review_dir = os.path.join(temp_dir, "review")
+    for d in (output_dir, failed_dir, review_dir):
+        os.makedirs(d, exist_ok=True)
+
     # Validate files sequentially: read one at a time to bound peak memory.
-    # We do not hold all file bytes in memory simultaneously — each file is
-    # validated then discarded or kept for processing individually.
+    # File contents are retained in the collection for later processing, so
+    # peak memory is bounded by MAX_TOTAL_SIZE rather than MAX_FILE_SIZE.
     validated_files = []
     total_size = 0
 
@@ -217,24 +247,6 @@ async def process_images(
             raise HTTPException(status_code=400, detail="Invalid or corrupted image")
 
         validated_files.append({"filename": file.filename, "contents": contents, "ext": ext})
-
-    is_new_session = False
-    if session_id:
-        validate_session_id(session_id)
-        # Require authentication before accessing or appending to an existing session
-        session = validate_session_token(session_id, authorization, allow_preview=False)
-        temp_dir = session["path"]
-        session_token = None  # Frontend already has token from initial session creation
-    else:
-        is_new_session = True
-        session_id = str(uuid.uuid4())
-        base_dir = "temp_logs" if os.path.exists("temp_logs") else ("/app/temp_logs" if os.path.exists("/app/temp_logs") else tempfile.gettempdir())
-        temp_dir = os.path.join(base_dir, session_id)
-    output_dir = os.path.join(temp_dir, "output")
-    failed_dir = os.path.join(temp_dir, "failed")
-    review_dir = os.path.join(temp_dir, "review")
-    for d in (output_dir, failed_dir, review_dir):
-        os.makedirs(d, exist_ok=True)
 
     processed = []
     failed = []
@@ -346,10 +358,14 @@ async def process_images(
             await run_in_threadpool(save_session_metadata, session_id, temp_dirs[session_id])
 
     # Rate-gated session expiry — runs at most once per minute, not on every request
-    _maybe_cleanup_expired_sessions()
+    await run_in_threadpool(_maybe_cleanup_expired_sessions)
 
-    has_processed = len(processed) > 0
-    has_failed = len(failed) > 0
+    has_processed = os.path.isdir(output_dir) and any(
+        f for f in os.listdir(output_dir) if not f.startswith(".")
+    )
+    has_failed = os.path.isdir(failed_dir) and any(
+        f for f in os.listdir(failed_dir) if not f.startswith(".")
+    )
 
     response_data = {
         "session_id": session_id,
@@ -396,9 +412,9 @@ async def download_zip(
     # Accept either header-based auth or a single-use download token.
     # The dl_token is short-lived and single-use — it is NOT the session token.
     if dl_token:
-        if not _consume_download_token(dl_token, session_id):
+        if not _peek_download_token(dl_token, session_id):
             raise HTTPException(status_code=403, detail="Invalid or expired download token")
-        # Retrieve session without token verification (token already consumed above)
+        # Retrieve session without token verification (token already peeked above)
         from core.security import temp_dirs as _td
         session = _td.get(session_id)
         if not session:
@@ -410,9 +426,6 @@ async def download_zip(
 
     if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
         raise HTTPException(status_code=429, detail="Download limit exceeded")
-
-    session["download_count"] += 1
-    await run_in_threadpool(save_session_metadata, session_id, session)
 
     base_path = Path(session["path"])
     zip_path = base_path / "output.zip"
@@ -430,6 +443,12 @@ async def download_zip(
             raise HTTPException(status_code=404, detail="No files to zip")
         await run_in_threadpool(_build_zip_atomically, zip_path, output_dir)
 
+    if dl_token:
+        if not _consume_download_token(dl_token, session_id):
+            raise HTTPException(status_code=403, detail="Invalid or expired download token")
+    session["download_count"] += 1
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     return FileResponse(str(zip_path), filename="saree_organized.zip", media_type="application/zip")
 
 
@@ -443,7 +462,7 @@ async def download_failed_zip(
     validate_session_id(session_id)
 
     if dl_token:
-        if not _consume_download_token(dl_token, session_id):
+        if not _peek_download_token(dl_token, session_id):
             raise HTTPException(status_code=403, detail="Invalid or expired download token")
         from core.security import temp_dirs as _td
         session = _td.get(session_id)
@@ -456,9 +475,6 @@ async def download_failed_zip(
 
     if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
         raise HTTPException(status_code=429, detail="Download limit exceeded")
-
-    session["download_count"] += 1
-    await run_in_threadpool(save_session_metadata, session_id, session)
 
     base_path = Path(session["path"])
     zip_path = base_path / "failed.zip"
@@ -475,6 +491,12 @@ async def download_failed_zip(
         if not failed_dir.exists() or not any(f for f in failed_dir.iterdir() if f.is_file()):
             raise HTTPException(status_code=404, detail="No failed files to zip")
         await run_in_threadpool(_build_zip_atomically, zip_path, failed_dir)
+
+    if dl_token:
+        if not _consume_download_token(dl_token, session_id):
+            raise HTTPException(status_code=403, detail="Invalid or expired download token")
+    session["download_count"] += 1
+    await run_in_threadpool(save_session_metadata, session_id, session)
 
     return FileResponse(str(zip_path), filename="failed_images.zip", media_type="application/zip")
 
@@ -596,6 +618,8 @@ async def download_single_image(session_id: str, filename: str, authorization: O
     safe_filename = validate_filename(filename)
     session = validate_session_token(session_id, authorization, allow_preview=False)
     session["access_count"] += 1
+    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Too many requests")
     await run_in_threadpool(save_session_metadata, session_id, session)
 
     file_path = Path(session["path"]) / "output" / safe_filename
@@ -617,6 +641,8 @@ async def download_single_failed_image(session_id: str, filename: str, authoriza
     safe_filename = validate_filename(filename)
     session = validate_session_token(session_id, authorization, allow_preview=False)
     session["access_count"] += 1
+    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Too many requests")
     await run_in_threadpool(save_session_metadata, session_id, session)
 
     file_path = Path(session["path"]) / "failed" / safe_filename
