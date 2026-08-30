@@ -1,4 +1,4 @@
-# VR Image Sorter — Windows task runner.
+# VR Image Sorter -- Windows task runner.
 # Mirrors the Makefile targets so both platforms use the same command names.
 #   .\make.cmd setup      (cmd.exe)
 #   .\make.ps1 setup      (PowerShell)
@@ -127,8 +127,8 @@ switch ($Target.ToLower()) {
         Write-Host ""
         Write-Host "========================================================" -ForegroundColor Cyan
         Write-Host "  Starting VR Saree Image Sorter Full Stack" -ForegroundColor Cyan
-        Write-Host "  👉 Open your browser at: http://localhost:8080" -ForegroundColor Green
-        Write-Host "  🔌 Backend API running at: http://localhost:8000" -ForegroundColor Gray
+        Write-Host "  [>] Open your browser at: http://localhost:8080" -ForegroundColor Green
+        Write-Host "  [+] Backend API running at: http://localhost:8000" -ForegroundColor Gray
         Write-Host "========================================================" -ForegroundColor Cyan
         Write-Host ""
 
@@ -176,14 +176,10 @@ switch ($Target.ToLower()) {
         $env:OMP_NUM_THREADS = '1'
         $inPath = [System.IO.Path]::GetFullPath($IN)
         $outPath = [System.IO.Path]::GetFullPath($OUT)
+        $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
         Push-Location (Join-Path $Root 'backend')
         try {
-            $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
-            if ($extra.Count -gt 0) {
-                & $VPy cli.py sort --input $inPath --output $outPath @extra
-            } else {
-                & $VPy cli.py sort --input $inPath --output $outPath
-            }
+            & $VPy cli.py sort --input $inPath --output $outPath @extra
         } finally {
             Pop-Location
         }
@@ -197,14 +193,10 @@ switch ($Target.ToLower()) {
         $env:OMP_NUM_THREADS = '1'
         $inPath = [System.IO.Path]::GetFullPath($IN)
         $outPath = [System.IO.Path]::GetFullPath($OUT)
+        $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
         Push-Location (Join-Path $Root 'backend')
         try {
-            $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
-            if ($extra.Count -gt 0) {
-                & $VPy cli.py sort --input $inPath --output $outPath --resume @extra
-            } else {
-                & $VPy cli.py sort --input $inPath --output $outPath --resume
-            }
+            & $VPy cli.py sort --input $inPath --output $outPath --resume @extra
         } finally {
             Pop-Location
         }
@@ -218,14 +210,10 @@ switch ($Target.ToLower()) {
         $env:OMP_NUM_THREADS = '1'
         $inPath = [System.IO.Path]::GetFullPath($IN)
         $outPath = [System.IO.Path]::GetFullPath($OUT)
+        $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
         Push-Location (Join-Path $Root 'backend')
         try {
-            $extra = if ($SORT_ARGS) { $SORT_ARGS.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) } else { @() }
-            if ($extra.Count -gt 0) {
-                & $VPy cli.py watch --input $inPath --output $outPath @extra
-            } else {
-                & $VPy cli.py watch --input $inPath --output $outPath
-            }
+            & $VPy cli.py watch --input $inPath --output $outPath @extra
         } finally {
             Pop-Location
         }
