@@ -64,6 +64,9 @@ switch ($Target.ToLower()) {
             @('down',      'Stop Docker stack'),
             @('logs',      'Tail Docker logs'),
             @('test',      'Accuracy check against .\input'),
+            @('test-real', 'Accuracy check against sandbox real images'),
+            @('bench-varahi', '100-image benchmark on Varahi production saree dataset'),
+            @('test-all',  'Master benchmark across all 124+ images in all datasets'),
             @('bench',     'Timing on .\input'),
             @('dist',      'Build distributable zip in .\dist'),
             @('clean',     'Remove venv, node_modules, dist')
@@ -87,19 +90,27 @@ switch ($Target.ToLower()) {
     'setup-frontend' { Setup-Frontend }
 
     'dev' {
+        Write-Host ""
+        Write-Host "========================================================" -ForegroundColor Cyan
+        Write-Host "  Starting VR Saree Image Sorter Full Stack" -ForegroundColor Cyan
+        Write-Host "  👉 Open your browser at: http://localhost:8080" -ForegroundColor Green
+        Write-Host "  🔌 Backend API running at: http://localhost:8000" -ForegroundColor Gray
+        Write-Host "========================================================" -ForegroundColor Cyan
+        Write-Host ""
+
         # Backend in its own window so Ctrl-C on the frontend does not orphan it.
         Start-Process -FilePath 'powershell' -ArgumentList @(
-            '-NoExit', '-Command', "Set-Location '$Root\backend'; & '$VUvi' main:app --host 0.0.0.0 --port 8000 --reload"
+            '-NoExit', '-Command', "Set-Location '$Root\backend'; Write-Host 'Backend API running on http://localhost:8000 (Keep this window open)' -ForegroundColor Green; & '$VUvi' main:app --host 0.0.0.0 --port 8000"
         )
         Start-Sleep -Seconds 2
         $env:VITE_API_URL = 'http://localhost:8000'
         Push-Location $Root
-        try { npm run dev -- --port 8080 } finally { Pop-Location }
+        try { npm run dev -- --port 8080 --open } finally { Pop-Location }
     }
 
     'dev-backend' {
         Push-Location (Join-Path $Root 'backend')
-        try { & $VUvi main:app --host 0.0.0.0 --port 8000 --reload } finally { Pop-Location }
+        try { & $VUvi main:app --host 0.0.0.0 --port 8000 } finally { Pop-Location }
     }
 
     'dev-frontend' {
@@ -120,6 +131,21 @@ switch ($Target.ToLower()) {
     'test' {
         Push-Location $Root
         try { & $VPy test_pipeline.py } finally { Pop-Location }
+    }
+
+    'test-real' {
+        Push-Location (Join-Path $Root 'backend')
+        try { & $VPy test_real_images.py } finally { Pop-Location }
+    }
+
+    'bench-varahi' {
+        Push-Location (Join-Path $Root 'backend')
+        try { & $VPy test_varahi_benchmark.py } finally { Pop-Location }
+    }
+
+    'test-all' {
+        Push-Location (Join-Path $Root 'backend')
+        try { & $VPy test_all_datasets.py } finally { Pop-Location }
     }
 
     'bench' {

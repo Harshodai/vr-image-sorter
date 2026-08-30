@@ -39,11 +39,34 @@ def _decide(candidates: list[Candidate]) -> ScanResult:
         if c.code not in best_by_code or c.confidence > best_by_code[c.code].confidence:
             best_by_code[c.code] = c
 
-    ranked = sorted(best_by_code.values(), key=lambda c: c.confidence, reverse=True)
+    # Deduplicate fragments: Remove a candidate only when its extraction metadata confirms
+    # it is a fragment from the same OCR read (same source, rotation, and method);
+    # otherwise retain both codes for the existing rival check to evaluate.
+    filtered_by_code: dict[str, Candidate] = {}
+    for code, cand in best_by_code.items():
+        is_fragment = any(
+            other.code != code
+            and len(other.code) > len(code)
+            and other.code.startswith(code)
+            and other.source == cand.source
+            and other.rotation == cand.rotation
+            and other.method == cand.method
+            for other in candidates
+        )
+        if not is_fragment:
+            filtered_by_code[code] = cand
+
+    # Rank: (1) not substituted, (2) >= 5 digits (length >= 7 with 'VR'), (3) confidence
+    def _rank_key(c: Candidate):
+        is_full_length = len(c.code) >= 7
+        return (not c.substituted, is_full_length, c.confidence)
+
+    ranked = sorted(filtered_by_code.values(), key=_rank_key, reverse=True)
     best = ranked[0]
     all_candidates = tuple(ranked)
 
-    rivals = [c for c in ranked[1:] if c.confidence >= OCR_MIN_CONFIDENCE]
+    # Rivals check: only consider genuine different codes (not fragments)
+    rivals = [c for c in ranked[1:] if c.confidence >= OCR_MIN_CONFIDENCE and not (best.code.startswith(c.code) or c.code.startswith(best.code))]
     if rivals:
         return ScanResult(
             code=best.code, confidence=best.confidence, method="ocr", needs_review=True,
@@ -107,28 +130,28 @@ def process_pipeline(image_bytes: bytes, max_dim: int | None = None) -> ScanResu
     for i, crop in enumerate(label_crops):
         code = decode_barcode_robust(crop)
         if code:
-            logger.info("Barcode found on label crop %d", i)
+            logger.info("Barcode found on label crop %d: %s", i, code)
             return ScanResult(code=code, confidence=1.0, method="barcode",
                               reason="checksum-verified barcode",
                               candidates=(Candidate(code, 1.0, "barcode", f"crop{i}"),))
 
     code = decode_barcode_robust(original_image)
     if code:
-        logger.info("Barcode found on full image scan")
+        logger.info("Barcode found on full image scan: %s", code)
         return ScanResult(code=code, confidence=1.0, method="barcode",
                           reason="checksum-verified barcode",
                           candidates=(Candidate(code, 1.0, "barcode", "full"),))
 
-    # OCR fallback. Every rotation and source is read and pooled, because
-    # agreement between independent passes is what makes a read trustworthy.
+    # OCR fallback: try detected label crops first (fast and highly accurate)
     logger.debug("Attempting OCR fallback")
-    best_roi = label_crops[0] if label_crops else None
-    candidates = scan_ocr(original_image, roi_image=best_roi)
+    candidates: list[Candidate] = []
+    if label_crops:
+        for i, crop in enumerate(label_crops):
+            crop_candidates = scan_ocr(crop, source=f"crop{i}")
+            if crop_candidates:
+                candidates.extend(crop_candidates)
 
-    if not candidates and len(label_crops) > 1:
-        for crop in label_crops[1:]:
-            candidates.extend(scan_ocr(crop))
-            if candidates:
-                break
+    if not candidates:
+        candidates = scan_ocr(original_image, source="full")
 
     return _decide(candidates)

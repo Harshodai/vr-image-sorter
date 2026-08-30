@@ -10,19 +10,39 @@ logger = logging.getLogger("vr-saree-sorter.strategies.barcode")
 
 
 
-# VR pattern: "VR" followed by digits. Applied to cleaned text.
-VR_PATTERN = re.compile(r"VR\d+", re.IGNORECASE)
+# VR pattern: "VR" followed by 4-8 digits.
+VR_EXPLICIT_PATTERN = re.compile(r"VR\d{4,8}(?!\d)", re.IGNORECASE)
+# Pure SKU digit pattern (5-7 digits) used in saree retail barcodes (e.g., 173873 or 221130)
+VR_DIGIT_PATTERN = re.compile(r"(?:^|[^\d])(\d{5,7})(?:[^\d]|$)", re.IGNORECASE)
 
 def _extract_vr_from_barcode(text: str) -> str | None:
     """
-    Only accept barcode data that contains a VR code.
-    Pure digit strings (UPC, EAN, etc.) are rejected — they fall through to OCR
-    which has context-aware VR extraction from the printed label text.
+    Extract VR code from barcode data.
+    Supports:
+      1. Direct VR codes: 'VR173873', 'VR221130'
+      2. Delimited codes: 'VR173873/251130', '173873-251130'
+      3. Pure 5-7 digit SKU barcodes from saree ERPs: '173873' -> 'VR173873'
     """
     clean = text.strip().upper()
-    match = VR_PATTERN.search(clean)
+    
+    # 1. Direct VR pattern match
+    match = VR_EXPLICIT_PATTERN.search(clean)
     if match:
-        return match.group(0)
+        return match.group(0).upper()
+
+    # 2. Check for delimited format e.g. "173873/251130" or "173873 251130"
+    tokens = re.split(r"[\s/\-_|]+", clean)
+    for tok in tokens:
+        m = VR_EXPLICIT_PATTERN.search(tok)
+        if m:
+            return m.group(0).upper()
+        if re.fullmatch(r"\d{5,7}", tok):
+            return f"VR{tok}"
+
+    # 3. Check for standalone 5-7 digits (ignoring standard 12/13-digit EAN/UPC)
+    if len(clean) >= 5 and len(clean) <= 7 and clean.isdigit():
+        return f"VR{clean}"
+        
     return None
 
 def decode_barcode_robust(image) -> str | None:

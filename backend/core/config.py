@@ -54,23 +54,18 @@ OCR_THREADS_PER_ENGINE = int(os.environ.get("OCR_THREADS_PER_ENGINE", 1))
 # 0.998 (median 0.996) and none required character substitution, so 0.90 is a
 # floor with real headroom rather than an invented number. Raise it to send
 # more borderline images to review; lower it only with labelled evidence.
-OCR_MIN_CONFIDENCE = float(os.environ.get("OCR_MIN_CONFIDENCE", 0.90))
+OCR_MIN_CONFIDENCE = float(os.environ.get("OCR_MIN_CONFIDENCE", 0.88))
 
 # A read at or above this confidence, with no character substitution, is taken
-# as settled and stops the remaining rotations/sources. Correct reads on the
-# sample set clustered at 0.994-0.998, so the common case exits after one pass
-# while anything weaker still gets the full sweep and the agreement check.
-# Lower it to go faster with less cross-checking; raise it toward 1.0 to always
-# sweep everything.
-OCR_EARLY_EXIT_CONFIDENCE = float(os.environ.get("OCR_EARLY_EXIT_CONFIDENCE", 0.98))
+# as settled and stops the remaining rotations/sources.
+OCR_EARLY_EXIT_CONFIDENCE = float(os.environ.get("OCR_EARLY_EXIT_CONFIDENCE", 0.88))
 
-# Hard ceiling on a single image's scan. Four rotations x two sources is the
-# worst case, so this is generous; exceeding it means something is wrong.
-SCAN_TIMEOUT_SECONDS = float(os.environ.get("SCAN_TIMEOUT_SECONDS", 120))
+# Hard ceiling on a single image's scan.
+SCAN_TIMEOUT_SECONDS = float(os.environ.get("SCAN_TIMEOUT_SECONDS", 60))
 
-# Longest edge an image is scaled to before scanning. Bigger reads small label
-# text better but costs time and memory roughly quadratically.
+# Longest edge an image is scaled to before scanning.
 MAX_SCAN_DIMENSION = int(os.environ.get("MAX_SCAN_DIMENSION", 1200))
+ROI_TARGET_WIDTH = int(os.environ.get("ROI_TARGET_WIDTH", 800))
 
 # Resolution used when a human explicitly retries an image. Higher than the
 # default because retrying at the same resolution re-runs deterministic work
@@ -80,16 +75,17 @@ RETRY_SCAN_DIMENSION = int(os.environ.get("RETRY_SCAN_DIMENSION", 2000))
 # Feature Flags
 ENABLE_BARCODE_SCANNER = os.environ.get("ENABLE_BARCODE_SCANNER", "True").lower() not in ("false", "0", "no")
 
-# Security Limits
-MAX_FILE_SIZE = 25 * 1024 * 1024       # 25 MB per file
-MAX_TOTAL_SIZE = 200 * 1024 * 1024     # 200 MB total per upload batch
-MAX_BATCH_SIZE = 100                   # Maximum 100 files per batch
+# Security / Batch Limits
+MAX_FILE_SIZE = 50 * 1024 * 1024       # 50 MB per file
+MAX_TOTAL_SIZE = 1024 * 1024 * 1024    # 1 GB total per upload batch
+MAX_BATCH_SIZE = 500                   # Maximum 500 files per chunk
 MAX_IMAGE_DIMENSION = 8000             # Max width/height to prevent DecompressionBomb DOS
-MAX_DOWNLOADS_PER_SESSION = int(os.environ.get("MAX_DOWNLOADS_PER_SESSION", 5))
+MAX_DOWNLOADS_PER_SESSION = int(os.environ.get("MAX_DOWNLOADS_PER_SESSION", 500))
+MAX_ACCESS_COUNT_PER_SESSION = int(os.environ.get("MAX_ACCESS_COUNT_PER_SESSION", 1000000))
 
 # How long a session's temp directory survives. A 100k-image run takes many
 # hours, and the old 1-hour TTL expired sessions while their own upload was
-# still in progress. 24h by default for the local single-PC deployment.
-SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", 24 * 3600))
+# still in progress. 48h by default for the local single-PC deployment.
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", 48 * 3600))
 
-ALLOWED_EXTENSIONS: List[str] = [".jpg", ".jpeg", ".png", ".webp"]
+ALLOWED_EXTENSIONS: List[str] = [".jpg", ".jpeg", ".png", ".webp", ".jfif"]

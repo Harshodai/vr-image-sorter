@@ -21,7 +21,7 @@ NPM_INSTALL = npm ci --prefer-offline --no-audit --fund=false || npm install --n
 
 .DEFAULT_GOAL := help
 .PHONY: help setup setup-backend setup-frontend dev dev-backend dev-frontend \
-        up down logs build rebuild test bench clean dist doctor sort resume watch apply
+        up down logs build rebuild test test-real bench-varahi test-all bench clean dist doctor sort resume watch apply
 
 help: ## Show this help
 	@echo "make <target>   (Windows: .\\make.cmd <target>)"
@@ -53,7 +53,7 @@ dev: ## Run backend + frontend together (Ctrl-C stops both)
 	@$(MAKE) -j2 dev-backend dev-frontend
 
 dev-backend: ## Backend only on :8000
-	cd backend && ../$(VENV)/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+	cd backend && ../$(VENV)/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 
 dev-frontend: ## Frontend only on :8080
 	VITE_API_URL=http://localhost:8000 npm run dev -- --port 8080
@@ -100,6 +100,15 @@ apply: ## Apply corrected codes: make apply OUT=./sorted
 
 test: ## Accuracy check against ./input (known VR codes)
 	$(PYBIN) test_pipeline.py
+
+test-real: ## Accuracy check against sandbox real images
+	cd backend && ../$(VENV)/bin/python test_real_images.py
+
+bench-varahi: ## 100-image benchmark on Varahi production saree dataset
+	cd backend && ../$(VENV)/bin/python test_varahi_benchmark.py
+
+test-all: ## Master benchmark across all 124+ images in all datasets
+	cd backend && ../$(VENV)/bin/python test_all_datasets.py
 
 bench: ## Timing on ./input
 	@cd backend && ../$(VENV)/bin/python -c "import sys,glob,time; sys.path.insert(0,'.'); \

@@ -8,20 +8,70 @@ import { toast } from 'sonner';
  * the tab long before the backend sees any of them. The cap is a hard stop with
  * a pointer at the folder-based CLI, which is the right tool at that size.
  */
-export const MAX_BROWSER_IMAGES = 2000;
+export const MAX_BROWSER_IMAGES = 25000;
 
 /** Beyond this we stop generating preview URLs; the grid shows a count instead. */
 export const PREVIEW_LIMIT = 200;
 
-const ACCEPTED = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+const ACCEPTED_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/pjpeg',
+  'image/x-png',
+  'image/jfif',
+]);
+
+const ACCEPTED_EXTENSIONS = new Set([
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.jfif',
+]);
+
+const SYSTEM_FILE_PATTERNS = [
+  /^\./, // hidden files (.DS_Store, .gitignore, ._*)
+  /^__MACOSX/i,
+  /Thumbs\.db$/i,
+  /desktop\.ini$/i,
+];
+
+function isSystemFile(fileName: string): boolean {
+  const baseName = fileName.split(/[/\\]/).pop() || fileName;
+  return SYSTEM_FILE_PATTERNS.some(p => p.test(baseName));
+}
+
+function isValidImageFile(file: File): boolean {
+  if (isSystemFile(file.name)) return false;
+
+  // 1. Check MIME type if populated by the browser
+  if (file.type) {
+    return ACCEPTED_MIME_TYPES.has(file.type.toLowerCase());
+  }
+
+  // 2. Check file extension (crucial for folder selection and Drag & Drop where file.type is often "")
+  const lastDot = file.name.lastIndexOf('.');
+  if (lastDot !== -1) {
+    const ext = file.name.slice(lastDot).toLowerCase();
+    if (ACCEPTED_EXTENSIONS.has(ext)) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 export function useImageUpload() {
   const [images, setImages] = useState<UploadedImage[]>([]);
 
   const addImages = useCallback((files: FileList | File[]) => {
     const fileArray = Array.from(files);
-    const validFiles = fileArray.filter(file => ACCEPTED.includes(file.type));
-    const rejected = fileArray.length - validFiles.length;
+    // Ignore OS system/hidden files like .DS_Store, ._photo.jpg quietly
+    const nonSystemFiles = fileArray.filter(file => !isSystemFile(file.name));
+    const validFiles = nonSystemFiles.filter(isValidImageFile);
+    const rejected = nonSystemFiles.length - validFiles.length;
 
     setImages(prev => {
       const room = MAX_BROWSER_IMAGES - prev.length;
@@ -46,7 +96,7 @@ export function useImageUpload() {
       }));
 
       if (rejected > 0) {
-        toast.warning(`Skipped ${rejected} file(s) that are not JPG, PNG or WebP.`);
+        toast.warning(`Skipped ${rejected} non-image file(s).`);
       }
       if (dropped > 0) {
         toast.error(

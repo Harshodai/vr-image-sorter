@@ -29,55 +29,42 @@ def upscale_if_small(image, min_width=800):
     return image
 
 def extract_label_crops(image, mask, img_area):
-    """Extract perspective-corrected label crops from a binary mask."""
+    """Extract natural orientation label crops from a binary mask."""
+    h_img, w_img = image.shape[:2]
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     label_crops = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if not (img_area * 0.005 < area < img_area * 0.95):
+        # Sticker tags are typically between 0.2% and 30% of total image area
+        if not (img_area * 0.002 < area < img_area * 0.30):
             continue
         
-        rect = cv2.minAreaRect(cnt)
-        box = cv2.boxPoints(rect)
-        box = np.intp(box)
-        
-        rect_w, rect_h = rect[1]
-        if rect_w == 0 or rect_h == 0:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        if cw < 30 or ch < 20:
             continue
-        aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
-        if aspect > 5.0:
+        aspect = max(cw, ch) / min(cw, ch)
+        if aspect > 4.0:
             continue
         
-        src_pts = box.astype(np.float32)
-        src_pts = order_points(src_pts)
+        # 1. Natural padded bounding box crop (tight padding preserves crisp white label contrast)
+        pad_x = 6
+        pad_y = 6
+        bbox_crop = image[max(0, y - pad_y):min(h_img, y + ch + pad_y),
+                          max(0, x - pad_x):min(w_img, x + cw + pad_x)]
         
-        dst_w = int(max(rect_w, rect_h))
-        dst_h = int(min(rect_w, rect_h))
-        if dst_w < 50 or dst_h < 30:
-            continue
-        
-        dst_pts = np.array([
-            [0, 0], [dst_w - 1, 0],
-            [dst_w - 1, dst_h - 1], [0, dst_h - 1]
-        ], dtype=np.float32)
-        
-        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
-        
-        pad = 10
-        padded = cv2.copyMakeBorder(warped, pad, pad, pad, pad,
-                                    cv2.BORDER_CONSTANT, value=(255, 255, 255))
-        
-        label_crops.append((area, padded))
+        area_ratio = area / img_area
+        priority = 1.0 if (0.004 <= area_ratio <= 0.12) else 0.5
+        label_crops.append((priority, area, bbox_crop))
     
-    label_crops.sort(key=lambda x: x[0], reverse=True)
-    return [crop for _, crop in label_crops]
+    # Sort by priority (ideal tag size first), then area
+    label_crops.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [crop for _, _, crop in label_crops]
 
 def detect_label_regions(image):
     """
     Detect white/light rectangular label stickers in the image.
-    Strategy: Progressive HSV saturation sweeps.
+    Strategy: Progressive HSV saturation sweeps with size prioritization.
     """
     h, w = image.shape[:2]
     img_area = h * w
@@ -87,14 +74,16 @@ def detect_label_regions(image):
     val = hsv[:, :, 2]
     
     threshold_configs = [
-        (25, 120),   (40, 120),   (60, 140),
+        (40, 150),   # Crisp bright white stickers
+        (30, 120),   # Off-white / shadow stickers
+        (60, 140),   # Tinted labels
     ]
     
     for s_max, v_min in threshold_configs:
         mask = np.zeros((h, w), dtype=np.uint8)
         mask[(sat < s_max) & (val > v_min)] = 255
         
-        k_size = max(15, min(h, w) // 25)
+        k_size = max(9, min(h, w) // 40)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL_SMALL)

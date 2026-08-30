@@ -169,29 +169,52 @@ export function useProcessing() {
 
     abortControllerRef.current = new AbortController();
 
+    const CHUNK_SIZE = 15;
+    let allProcessedFiles: ProcessedFile[] = [];
+    let allFailedFiles: FailedFile[] = [];
+    let allReviewFiles: ReviewFile[] = [];
+    let finalSessionId: string | undefined = undefined;
+
     try {
-      const CHUNK_SIZE = 50;
-      let allProcessedFiles: ProcessedFile[] = [];
-      let allFailedFiles: FailedFile[] = [];
-      let allReviewFiles: ReviewFile[] = [];
-      let finalSessionId: string | undefined = undefined;
+      // Chunk size of 15 images keeps upload payload (~50-80MB) safely below
+      // MAX_TOTAL_SIZE (200MB) limit, prevents socket timeouts and memory spikes
+      // during long OCR sweeps, and provides smooth, responsive progress updates.
+      const totalChunks = Math.ceil(images.length / CHUNK_SIZE);
 
       for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+        const chunkIndex = Math.floor(i / CHUNK_SIZE) + 1;
         const chunk = images.slice(i, i + CHUNK_SIZE);
+        console.log(`[VR Sorter] Uploading & scanning chunk ${chunkIndex}/${totalChunks} (${chunk.length} images)...`);
+
         const formData = new FormData();
         chunk.forEach(img => formData.append('files', img.file));
+        const headers: Record<string, string> = {};
         if (finalSessionId) {
           formData.append('session_id', finalSessionId);
+          if (sessionToken) {
+            headers['Authorization'] = `Bearer ${sessionToken}`;
+            formData.append('token', sessionToken);
+          }
         }
 
         const response = await fetchWithRetry(`${API_BASE_URL}/api/process`, {
           method: 'POST',
+          headers,
           body: formData,
           signal: abortControllerRef.current.signal,
         });
 
         if (!response.ok) {
-          throw new Error('Processing failed. Please check if the backend is running.');
+          let errorDetail = `Server returned error (${response.status})`;
+          try {
+            const errData = await response.json();
+            if (errData && errData.detail) {
+              errorDetail = typeof errData.detail === 'string' ? errData.detail : JSON.stringify(errData.detail);
+            }
+          } catch {
+            // Ignore json parse failure on non-JSON error pages
+          }
+          throw new Error(errorDetail);
         }
 
         const data: ApiProcessResponse = await response.json();
@@ -262,15 +285,49 @@ export function useProcessing() {
       const errorMessage = err instanceof Error ? err.message : 'An error occurred';
       setError(errorMessage);
 
-      // Show user-friendly error (not developer-facing env var names)
-      if (!navigator.onLine) {
-        toast.error('You appear to be offline. Please check your internet connection and try again.');
+      const isLocal = API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1');
+
+      if (err instanceof TypeError) {
+        // Network-level failure (e.g. backend server is not running or connection refused)
+        if (isLocal) {
+          toast.error(
+            `Cannot connect to local backend at ${API_BASE_URL}. Please ensure the backend is running.`
+          );
+        } else if (!navigator.onLine) {
+          toast.error('You appear to be offline. Please check your internet connection and try again.');
+        } else {
+          toast.error(`Could not connect to ${API_BASE_URL}. Please check the server status and try again.`);
+        }
       } else {
-        toast.error('Could not connect to the server. Please check your internet connection and try again.');
+        // Application error returned from server (400, 413, 500, etc.)
+        toast.error(errorMessage);
       }
 
-      // Don't move to results state if there was a connection error
-      setState('upload');
+      const hasCompletedResults = allProcessedFiles.length > 0 || allFailedFiles.length > 0 || allReviewFiles.length > 0;
+      if (hasCompletedResults) {
+        setResult({
+          stats: {
+            totalFiles: images.length,
+            processedFiles: allProcessedFiles.length,
+            failedFiles: allFailedFiles.length,
+            reviewFiles: allReviewFiles.length,
+            successRate: Math.round((allProcessedFiles.length / images.length) * 100),
+          },
+          processedFiles: allProcessedFiles,
+          failedFiles: allFailedFiles,
+          reviewFiles: allReviewFiles,
+          hasReview: allReviewFiles.length > 0,
+          downloadUrl: finalSessionId && allProcessedFiles.length > 0 ? `${API_BASE_URL}/api/download/${finalSessionId}` : undefined,
+          failedDownloadUrl: finalSessionId && allFailedFiles.length > 0 ? `${API_BASE_URL}/api/download-failed/${finalSessionId}` : undefined,
+          hasProcessed: allProcessedFiles.length > 0,
+          hasFailed: allFailedFiles.length > 0,
+          sessionId: finalSessionId,
+        });
+        setState('results');
+      } else {
+        // Don't move to results state if there was a connection error and no prior chunks completed
+        setState('upload');
+      }
     }
   }, []);
 

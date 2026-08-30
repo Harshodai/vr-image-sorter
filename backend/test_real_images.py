@@ -36,6 +36,7 @@ GROUND_TRUTH = {
     "WhatsApp Image 2026-03-04 at 7.09.58 PM.jpeg": "VR216168",
     "WhatsApp Image 2026-03-04 at 7.11.01 PM.jpeg": "VR226959",
     "WhatsApp Image 2026-03-04 at 7.11.33 PM.jpeg": "VR226941",
+    "VR173873_pattu_saree.jpg": "VR173873",
 }
 
 SANDBOX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "sandbox")

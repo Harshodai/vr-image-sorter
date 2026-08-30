@@ -24,6 +24,7 @@ EXPECTED = {
     "WhatsApp Image 2025-10-13 at 20.18.21 (2).jpeg": "VR88772",
     "WhatsApp Image 2025-10-13 at 20.18.21 (3).jpeg": "VR86979",
     "WhatsApp Image 2025-10-13 at 20.18.21.jpeg": "VR88772",
+    "VR173873_pattu_saree.jpg": "VR173873",
 }
 
 def main():

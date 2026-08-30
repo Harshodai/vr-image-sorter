@@ -18,11 +18,36 @@ class RapidsEnginePool:
         if self._initialized:
             return
         
-        logger.info(f"Setting up lazy RapidOCR pool of size {self.size}...")
+        logger.info(f"Setting up RapidOCR pool of size {self.size}...")
         for i in range(self.size):
             self.pool.put(None)
         self._initialized = True
         logger.info("RapidOCR pool initialized.")
+
+    def _create_engine(self) -> RapidOCR:
+        logger.info("Instantiating RapidOCR ONNX engine...")
+        return RapidOCR(
+            det_limit_side_len=960,
+            text_score=0.4,
+            intra_op_num_threads=OCR_THREADS_PER_ENGINE,
+            inter_op_num_threads=OCR_THREADS_PER_ENGINE,
+        )
+
+    def warm_up(self, count: int = 1):
+        """Pre-instantiate engines so the first user request experiences zero cold-start delay."""
+        if not self._initialized:
+            self.initialize()
+        
+        warmed = []
+        for _ in range(min(count, self.size)):
+            eng = self.pool.get()
+            if eng is None:
+                eng = self._create_engine()
+            warmed.append(eng)
+            
+        for eng in warmed:
+            self.pool.put(eng)
+        logger.info("RapidOCR pool pre-warmed with %d engine(s).", len(warmed))
 
     def acquire(self) -> RapidOCR:
         if not self._initialized:
@@ -30,21 +55,7 @@ class RapidsEnginePool:
             
         engine = self.pool.get()
         if engine is None:
-            logger.info("Lazy loading RapidOCR engine...")
-            # det_limit_side_len=960: Higher detection resolution for small label text
-            # text_score=0.4: Lower threshold catches more candidates (VR filter handles precision)
-            # Benchmark-verified: 36% faster than defaults, same 100% accuracy
-            # intra/inter_op_num_threads: ONNX Runtime defaults to -1 (= every core),
-            # so a single process saturates the CPU and extra workers only contend —
-            # measured 1.06 img/s at 1, 4 and 8 workers alike. Pinning each engine to
-            # one thread lets process-level parallelism actually scale (2.03 img/s at
-            # 10 workers on a 10-core host).
-            engine = RapidOCR(
-                det_limit_side_len=960,
-                text_score=0.4,
-                intra_op_num_threads=OCR_THREADS_PER_ENGINE,
-                inter_op_num_threads=OCR_THREADS_PER_ENGINE,
-            )
+            engine = self._create_engine()
         return engine
 
     def release(self, engine: RapidOCR):
