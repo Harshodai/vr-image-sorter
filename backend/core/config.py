@@ -58,7 +58,16 @@ OCR_MIN_CONFIDENCE = float(os.environ.get("OCR_MIN_CONFIDENCE", 0.88))
 
 # A read at or above this confidence, with no character substitution, is taken
 # as settled and stops the remaining rotations/sources.
-OCR_EARLY_EXIT_CONFIDENCE = float(os.environ.get("OCR_EARLY_EXIT_CONFIDENCE", 0.88))
+# Must be STRICTLY above OCR_MIN_CONFIDENCE so reads that merely pass the
+# acceptance floor continue through remaining rotations/sources, allowing
+# multi-candidate aggregation and settlement ranking to complete.
+OCR_EARLY_EXIT_CONFIDENCE = float(os.environ.get("OCR_EARLY_EXIT_CONFIDENCE", 0.95))
+if OCR_EARLY_EXIT_CONFIDENCE <= OCR_MIN_CONFIDENCE:
+    raise ValueError(
+        f"OCR_EARLY_EXIT_CONFIDENCE ({OCR_EARLY_EXIT_CONFIDENCE}) must be strictly "
+        f"greater than OCR_MIN_CONFIDENCE ({OCR_MIN_CONFIDENCE}). "
+        "Reads that barely pass the acceptance floor must not trigger early exit."
+    )
 
 # Hard ceiling on a single image's scan.
 SCAN_TIMEOUT_SECONDS = float(os.environ.get("SCAN_TIMEOUT_SECONDS", 60))

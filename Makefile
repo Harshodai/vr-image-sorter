@@ -40,6 +40,7 @@ doctor: ## Check prerequisites are installed
 setup: setup-backend setup-frontend ## One-shot install: backend venv + OCR models + frontend deps
 	@echo ""
 	@echo "Setup complete. Run 'make dev' then open http://localhost:8080"
+	@echo "Tip: copy .env.example -> .env to customise ports and secrets."
 
 setup-backend: ## Backend venv + Python deps + pre-downloaded OCR models
 	$(MKVENV)
@@ -52,17 +53,17 @@ setup-frontend: ## Frontend deps
 dev: ## Run backend + frontend together (Ctrl-C stops both)
 	@$(MAKE) -j2 dev-backend dev-frontend
 
-dev-backend: ## Backend only on :8000
-	cd backend && ../$(VENV)/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+dev-backend: ## Backend only on :8000 (dev mode, no secret key required)
+	cd backend && APP_ENV=development ../$(VENV)/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 dev-frontend: ## Frontend only on :8080
 	VITE_API_URL=http://localhost:8000 npm run dev -- --port 8080
 
 ## ---------- docker ----------
 
-up: ## Build + start full stack (frontend :8080, backend :8000)
+up: ## Build + start full stack (frontend :${UI_PORT:-8088}, backend :${PORT:-8001})
 	docker compose up --build -d
-	@echo "frontend http://localhost:8080   backend http://localhost:8000/docs"
+	@echo "frontend http://localhost:$${UI_PORT:-8088}   backend http://localhost:$${PORT:-8001}/docs"
 
 down: ## Stop stack
 	docker compose down
@@ -108,7 +109,7 @@ bench-varahi: ## 100-image benchmark on Varahi production saree dataset
 	cd backend && ../$(VENV)/bin/python test_varahi_benchmark.py
 
 test-all: ## Master benchmark across all 124+ images in all datasets
-	cd backend && ../$(VENV)/bin/python test_all_datasets.py
+	cd backend && APP_ENV=development ../$(VENV)/bin/python test_all_datasets.py
 
 bench: ## Timing on ./input
 	@cd backend && ../$(VENV)/bin/python -c "import sys,glob,time; sys.path.insert(0,'.'); \

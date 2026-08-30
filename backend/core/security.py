@@ -17,7 +17,10 @@ temp_dirs: Dict[str, Dict[str, Any]] = {}
 
 SESSION_META_FILENAME = ".session_meta.json"
 
-APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
+# Development mode is EXPLICITLY opt-in. An unset APP_ENV/ENVIRONMENT is
+# treated as production so that misconfigured deployments fail loudly rather
+# than silently using a weak dev secret.
+APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "production")).lower()
 IS_DEVELOPMENT = APP_ENV in ("development", "dev", "local", "test")
 
 _configured_secret = os.environ.get("SESSION_SECRET_KEY")
@@ -32,8 +35,19 @@ elif IS_DEVELOPMENT:
 else:
     raise RuntimeError(
         "SESSION_SECRET_KEY environment variable (at least 16 high-entropy characters) "
-        "is required in non-development deployments."
+        "is required in non-development deployments. "
+        "Set APP_ENV=development to opt into the insecure dev default."
     )
+
+# Trusted session base directories. tempfile.gettempdir() is intentionally
+# excluded: it is world-writable on most OSes and must not be used as a
+# restore source — an attacker-controlled session directory there could be
+# used to inject arbitrary session metadata.
+_TRUSTED_SESSION_BASES = [
+    "temp_logs",
+    "/app/temp_logs",
+    "./temp_logs",
+]
 
 def compute_session_hmac(session_id: str, created_at: float, token_hash: Optional[str], download_count: int, access_count: int) -> str:
     """Compute HMAC-SHA256 signature for session metadata integrity protection."""
@@ -75,13 +89,15 @@ def save_session_metadata(session_id: str, session: Optional[dict] = None) -> No
         logger.error("Failed to save session metadata for %s: %s", session_id, e)
 
 def restore_session_from_disk(session_id: str) -> Optional[dict]:
-    """Restore a session from disk verifying HMAC integrity protection and TTL expiration."""
+    """Restore a session from disk verifying HMAC integrity protection and TTL expiration.
+    Only searches trusted session base directories — world-writable paths like
+    tempfile.gettempdir() are explicitly excluded to prevent session injection.
+    """
     import time
     import shutil
     from core.config import SESSION_TTL_SECONDS
 
-    candidate_bases = ["temp_logs", "/app/temp_logs", "./temp_logs", tempfile.gettempdir()]
-    for base in candidate_bases:
+    for base in _TRUSTED_SESSION_BASES:
         for name in [session_id, f"session_{session_id}", f"vr_session_{session_id}"]:
             candidate_path = os.path.join(base, name)
             if os.path.exists(candidate_path) and os.path.isdir(candidate_path):
@@ -151,6 +167,12 @@ def validate_session_token(
 ) -> dict:
     """Security: Prevent unauthorized downloading of zips and access to sessions.
     Resilient across server reloads and local single-user workflow.
+
+    Preview policy:
+    - If the session has a stored token_hash, a valid token is REQUIRED even for
+      previews (token can be supplied via header or query param).
+    - Tokenless preview access is only permitted when the session has no token_hash
+      (e.g. freshly created sessions before the first chunk completes).
     """
     validate_session_id(session_id)
 
@@ -169,19 +191,24 @@ def validate_session_token(
     elif query_token:
         token = query_token.strip()
 
+    stored_hash = session.get("token_hash")
+
     # 3. Authenticate token based on policy
     if not allow_preview:
+        # Non-preview routes always require a valid token
         if not token:
             raise HTTPException(status_code=401, detail="Authentication token required")
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        stored_hash = session.get("token_hash")
         if not stored_hash or not hmac.compare_digest(stored_hash, token_hash):
             raise HTTPException(status_code=403, detail="Invalid session token")
     else:
-        # Preview routes allow tokenless access, but if a token is provided and session has token_hash, verify it
-        if token and session.get("token_hash"):
+        # Preview routes: if the session has a token_hash, a valid token is required.
+        # Only permit tokenless access when the session has no token_hash.
+        if stored_hash:
+            if not token:
+                raise HTTPException(status_code=401, detail="Authentication token required for this session")
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            if not hmac.compare_digest(session["token_hash"], token_hash):
+            if not hmac.compare_digest(stored_hash, token_hash):
                 raise HTTPException(status_code=403, detail="Invalid session token")
 
     return session

@@ -2,8 +2,8 @@
 echo ==========================================
 echo Starting Saree Sorter Full Stack
 echo ==========================================
-echo Backend:  http://localhost:8000
-echo Frontend: http://localhost:8080
+echo Backend:  http://localhost:8001/docs
+echo Frontend: http://localhost:8088
 echo.
 echo Building and starting containers...
 echo.

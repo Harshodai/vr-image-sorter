@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class FileResponse(BaseModel):
     original_name: str
@@ -8,7 +8,7 @@ class FileResponse(BaseModel):
 
 class FailedFileResponse(BaseModel):
     original_name: str
-    preview_url: str = None
+    preview_url: Optional[str] = None
 
 class UploadResponse(BaseModel):
     session_id: str
@@ -17,8 +17,8 @@ class UploadResponse(BaseModel):
     failed: List[FailedFileResponse]
     has_processed: bool
     has_failed: bool
-    download_url: str = None
-    failed_download_url: str = None
+    download_url: Optional[str] = None
+    failed_download_url: Optional[str] = None
 
 class ManualUploadRequest(BaseModel):
     vrcode: str

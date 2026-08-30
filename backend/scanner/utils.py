@@ -54,10 +54,18 @@ def extract_label_crops(image, mask, img_area):
                           max(0, x - pad_x):min(w_img, x + cw + pad_x)]
         
         area_ratio = area / img_area
-        priority = 1.0 if (0.004 <= area_ratio <= 0.12) else 0.5
-        label_crops.append((priority, area, bbox_crop))
-    
-    # Sort by priority (ideal tag size first), then area
+        # Priority 1.0 = ideal label size (0.4% – 12% of image area).
+        # Priority 0.5 = off-size but still worth trying.
+        # Within priority tier: ideal (1.0) → largest area first (more text context);
+        # off-size (0.5) → smallest area first (least likely to be background clutter).
+        is_ideal = 0.004 <= area_ratio <= 0.12
+        priority = 1.0 if is_ideal else 0.5
+        # sort key: primary = priority desc, secondary = area (desc for ideal, asc for off-size)
+        sort_area = area if is_ideal else -area
+        label_crops.append((priority, sort_area, bbox_crop))
+
+    # Ideal-size crops first (priority=1.0, largest-area-first).
+    # Off-size crops after (priority=0.5, smallest-area-first — avoids large background noise).
     label_crops.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [crop for _, _, crop in label_crops]
 
@@ -78,21 +86,24 @@ def detect_label_regions(image):
         (30, 120),   # Off-white / shadow stickers
         (60, 140),   # Tinted labels
     ]
-    
+
+    # Compute once — k_size depends only on image dimensions, which don't change
+    # between threshold iterations. Avoids 3 numpy allocations per image.
+    k_size = max(9, min(h, w) // 40)
+    dyn_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+
     for s_max, v_min in threshold_configs:
         mask = np.zeros((h, w), dtype=np.uint8)
         mask[(sat < s_max) & (val > v_min)] = 255
-        
-        k_size = max(9, min(h, w) // 40)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, dyn_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL_SMALL)
-        
+
         label_crops = extract_label_crops(image, mask, img_area)
         if label_crops:
             logger.debug("Label detection hit at S<%d V>%d: %d candidates", s_max, v_min, len(label_crops))
             return label_crops
-    
+
     return []
 
 def standardize_filename(barcode_data):

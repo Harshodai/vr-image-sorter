@@ -4,13 +4,33 @@ import numpy as np
 import logging
 from collections import defaultdict
 
-from core.config import OCR_MIN_CONFIDENCE, MAX_SCAN_DIMENSION
+from core.config import OCR_MIN_CONFIDENCE, OCR_EARLY_EXIT_CONFIDENCE, MAX_SCAN_DIMENSION
 from scanner.result import Candidate, ScanResult
 from scanner.utils import detect_label_regions
 from scanner.strategies.barcode import decode_barcode_robust
 from scanner.strategies.ocr import scan_ocr
 
 logger = logging.getLogger("vr-saree-sorter.pipeline")
+
+# Maximum number of label crops to scan before falling back to full-image OCR.
+# Prevents one upload from triggering unbounded OCR work on image-heavy labels.
+_MAX_LABEL_CROPS = 3
+
+
+def _candidates_are_settled(candidates: list[Candidate]) -> bool:
+    """True when candidates contain at least one clean, high-confidence read with consensus."""
+    strong = [c for c in candidates
+              if c.confidence >= OCR_EARLY_EXIT_CONFIDENCE and not c.substituted]
+    if not strong:
+        return False
+    return len({c.code for c in strong}) == 1
+
+
+def _candidates_are_weak(candidates: list[Candidate]) -> bool:
+    """True when all candidates are low-confidence or required character substitution."""
+    if not candidates:
+        return True
+    return all(c.confidence < OCR_MIN_CONFIDENCE or c.substituted for c in candidates)
 
 
 def _decide(candidates: list[Candidate]) -> ScanResult:
@@ -65,8 +85,23 @@ def _decide(candidates: list[Candidate]) -> ScanResult:
     best = ranked[0]
     all_candidates = tuple(ranked)
 
-    # Rivals check: only consider genuine different codes (not fragments)
-    rivals = [c for c in ranked[1:] if c.confidence >= OCR_MIN_CONFIDENCE and not (best.code.startswith(c.code) or c.code.startswith(best.code))]
+    # Rivals check: prefer the longer code when candidates are in a prefix relation
+    # from DIFFERENT sources; otherwise retain both as rivals for review.
+    # A shorter higher-confidence read from a different source cannot silently
+    # displace a longer conflicting code.
+    rivals = []
+    for c in ranked[1:]:
+        if c.confidence < OCR_MIN_CONFIDENCE:
+            continue
+        if best.code.startswith(c.code) or c.code.startswith(best.code):
+            # Prefix relation: only suppress the shorter code if it came from
+            # the same source/rotation (i.e. the same OCR pass). Cross-source
+            # prefix conflicts should surface for review.
+            if c.source != best.source or c.rotation != best.rotation:
+                rivals.append(c)
+        else:
+            rivals.append(c)
+
     if rivals:
         return ScanResult(
             code=best.code, confidence=best.confidence, method="ocr", needs_review=True,
@@ -142,16 +177,30 @@ def process_pipeline(image_bytes: bytes, max_dim: int | None = None) -> ScanResu
                           reason="checksum-verified barcode",
                           candidates=(Candidate(code, 1.0, "barcode", "full"),))
 
-    # OCR fallback: try detected label crops first (fast and highly accurate)
+    # OCR fallback: try detected label crops first (fast and highly accurate).
+    # Pass each crop as roi_image so scan_ocr uses the tiered ROI fast-exit path.
+    # Stop immediately on a settled, high-confidence read.
+    # Cap at _MAX_LABEL_CROPS to bound OCR work per image.
     logger.debug("Attempting OCR fallback")
     candidates: list[Candidate] = []
+    crops_scanned = 0
     if label_crops:
-        for i, crop in enumerate(label_crops):
-            crop_candidates = scan_ocr(crop, source=f"crop{i}")
+        for i, crop in enumerate(label_crops[:_MAX_LABEL_CROPS]):
+            crop_candidates = scan_ocr(crop, roi_image=crop, source=f"crop{i}")
+            crops_scanned += 1
             if crop_candidates:
                 candidates.extend(crop_candidates)
+                if _candidates_are_settled(candidates):
+                    logger.debug("Settled on label crop %d", i)
+                    break
 
-    if not candidates:
-        candidates = scan_ocr(original_image, source="full")
+    # Fall back to full-image OCR when:
+    #   (a) no crops were found, OR
+    #   (b) crop candidates exist but are all weak (low-confidence or substituted).
+    # Strong crop results are preserved — we don't overwrite them.
+    if not candidates or _candidates_are_weak(candidates):
+        logger.debug("Crop candidates weak or absent; running full-image OCR")
+        full_candidates = scan_ocr(original_image, source="full")
+        candidates.extend(full_candidates)
 
     return _decide(candidates)

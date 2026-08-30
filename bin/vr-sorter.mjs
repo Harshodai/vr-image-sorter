@@ -178,7 +178,7 @@ async function cmdStart() {
   const backend = spawn(join(VENV_BIN, IS_WIN ? 'uvicorn.exe' : 'uvicorn'),
     ['main:app', '--host', '0.0.0.0', '--port', port],
     { cwd: join(ROOT, 'backend'), stdio: 'inherit', shell: IS_WIN,
-      env: { ...process.env, OMP_NUM_THREADS: '1', MKL_NUM_THREADS: '1' } });
+      env: { ...process.env, APP_ENV: process.env.APP_ENV || 'development', OMP_NUM_THREADS: '1', MKL_NUM_THREADS: '1' } });
 
   const frontend = spawn('npm', ['run', 'dev', '--', '--port', uiPort],
     { cwd: ROOT, stdio: 'inherit', shell: IS_WIN,

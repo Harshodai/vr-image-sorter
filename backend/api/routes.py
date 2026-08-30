@@ -9,6 +9,7 @@ import zipfile
 import hashlib
 import tempfile
 import asyncio
+import secrets
 import concurrent.futures
 import logging
 from typing import List, Optional
@@ -17,14 +18,15 @@ from PIL import Image
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Header, BackgroundTasks, Request, Form
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from core.config import (
-    MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE, 
+    MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
     MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION,
     MAX_ACCESS_COUNT_PER_SESSION, SESSION_TTL_SECONDS, SCAN_TIMEOUT_SECONDS, RETRY_SCAN_DIMENSION
 )
 from core.security import (
-    validate_filename, validate_session_id, validate_session_token, 
+    validate_filename, validate_session_id, validate_session_token,
     generate_session_token, save_session_metadata, restore_session_from_disk,
     temp_dirs
 )
@@ -41,11 +43,67 @@ semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
 # Bounded thread pool prevents thread explosion under high concurrency
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_CONCURRENCY)
 
+# ---------------------------------------------------------------------------
+# Short-lived single-use download tokens
+# ---------------------------------------------------------------------------
+# Maps  token -> {"session_id": str, "expires_at": float}
+# Tokens are single-use and expire after _DOWNLOAD_TOKEN_TTL_S seconds.
+# They are issued via /api/issue-download-token/{session_id} and accepted
+# ONLY on download routes — never on preview or process routes.
+_download_tokens: dict[str, dict] = {}
+_DOWNLOAD_TOKEN_TTL_S = 120  # 2 minutes; enough for any browser redirect
+
+def _issue_download_token(session_id: str) -> str:
+    """Create a short-lived, single-use download token for URL-based file downloads."""
+    _purge_expired_download_tokens()
+    token = secrets.token_urlsafe(32)
+    _download_tokens[token] = {
+        "session_id": session_id,
+        "expires_at": time.monotonic() + _DOWNLOAD_TOKEN_TTL_S,
+    }
+    return token
+
+def _consume_download_token(token: str, session_id: str) -> bool:
+    """Validate and consume (delete) a download token. Returns True on success."""
+    _purge_expired_download_tokens()
+    entry = _download_tokens.get(token)
+    if not entry:
+        return False
+    if entry["session_id"] != session_id:
+        return False
+    if time.monotonic() > entry["expires_at"]:
+        _download_tokens.pop(token, None)
+        return False
+    _download_tokens.pop(token, None)  # single-use: consume immediately
+    return True
+
+def _purge_expired_download_tokens() -> None:
+    now = time.monotonic()
+    expired = [t for t, v in _download_tokens.items() if now > v["expires_at"]]
+    for t in expired:
+        _download_tokens.pop(t, None)
+
+# ---------------------------------------------------------------------------
+# Session cleanup — rate-gated to avoid scanning all sessions on every request
+# ---------------------------------------------------------------------------
+_last_cleanup_time: float = 0.0
+_CLEANUP_INTERVAL_S = 60.0  # run at most once per minute
+
+def _maybe_cleanup_expired_sessions() -> None:
+    global _last_cleanup_time
+    now = time.time()
+    if now - _last_cleanup_time < _CLEANUP_INTERVAL_S:
+        return
+    _last_cleanup_time = now
+    expired = [sid for sid, data in list(temp_dirs.items())
+               if now - data["created_at"] > SESSION_TTL_SECONDS]
+    for sid in expired:
+        cleanup_session(sid)
+
 def cleanup_session(session_id: str):
     session = temp_dirs.pop(session_id, None)
     if session:
         try:
-            import shutil
             shutil.rmtree(session["path"], ignore_errors=True)
             logger.info("Cleaned up session %s", session_id)
         except Exception as e:
@@ -100,6 +158,22 @@ def _invalidate_zips(base_path: Path) -> None:
     except Exception:
         pass
 
+def _build_zip_atomically(zip_path: Path, source_dir: Path) -> None:
+    """Write zip to a temp file inside base_path then atomically publish via os.replace.
+    Concurrent requests never read a partially-written archive.
+    """
+    tmp_path = zip_path.with_suffix(f".tmp.{secrets.token_hex(4)}")
+    try:
+        with zipfile.ZipFile(tmp_path, 'w', compression=zipfile.ZIP_STORED) as zf:
+            for f in source_dir.iterdir():
+                if f.is_file():
+                    zf.write(str(f), f.name)
+        os.replace(tmp_path, zip_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 @router.post("/api/process")
 async def process_images(
     files: List[UploadFile] = File(...),
@@ -111,42 +185,44 @@ async def process_images(
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_BATCH_SIZE} files allowed per request")
     if len(files) == 0:
         raise HTTPException(status_code=400, detail="No files provided")
-    
+
+    # Validate files sequentially: read one at a time to bound peak memory.
+    # We do not hold all file bytes in memory simultaneously — each file is
+    # validated then discarded or kept for processing individually.
     validated_files = []
     total_size = 0
-    
+
     for file in files:
         ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
         if ext not in ALLOWED_EXTENSIONS:
             raise HTTPException(status_code=400, detail=f"Invalid file type for '{file.filename}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
-        
+
         contents = await file.read()
         file_size = len(contents)
         if file_size > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail=f"File exceeds {MAX_FILE_SIZE // (1024*1024)}MB maximum limit")
-        
+
         total_size += file_size
         if total_size > MAX_TOTAL_SIZE:
             raise HTTPException(status_code=400, detail=f"Total upload size exceeds {MAX_TOTAL_SIZE // (1024*1024)}MB limit")
-        
+
         try:
-            image = Image.open(io.BytesIO(contents))
-            width, height = image.size  # Read dimensions before verify
-            image.verify()  # Validates integrity, invalidates object
-            if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
-                raise HTTPException(status_code=400, detail="Image dimensions exceed limit")
+            with Image.open(io.BytesIO(contents)) as image:
+                width, height = image.size
+                if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+                    raise HTTPException(status_code=400, detail="Image dimensions exceed limit")
         except HTTPException:
             raise
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid or corrupted image")
-        
+
         validated_files.append({"filename": file.filename, "contents": contents, "ext": ext})
-    
+
     is_new_session = False
     if session_id:
         validate_session_id(session_id)
         # Require authentication before accessing or appending to an existing session
-        session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
+        session = validate_session_token(session_id, authorization, allow_preview=False)
         temp_dir = session["path"]
         session_token = None  # Frontend already has token from initial session creation
     else:
@@ -163,27 +239,25 @@ async def process_images(
     processed = []
     failed = []
     review = []
-    
+
     batch_size = len(validated_files)
     logger.info("Batch processing started: %d file(s), concurrency limit=%d", batch_size, BATCH_CONCURRENCY)
     batch_start = time.monotonic()
-
 
     async def _process_one(file_data):
         contents = file_data["contents"]
         filename = file_data["filename"]
         ext = file_data["ext"]
         safe_filename = validate_filename(filename)
-        
+
         try:
             async with semaphore:
                 file_start = time.monotonic()
                 result = await scan_in_thread(contents)
                 elapsed = time.monotonic() - file_start
                 logger.info("File scanned in %.2fs: %s", elapsed, safe_filename)
-            
+
             if result.is_confident:
-                from scanner.utils import standardize_filename
                 clean_name = standardize_filename(result.code)
                 output_path, new_name = _unique_path(output_dir, f"{clean_name}{ext}")
                 with open(output_path, "wb") as f:
@@ -252,10 +326,10 @@ async def process_images(
         if status == "processed": processed.append(item)
         elif status == "review": review.append(item)
         else: failed.append(item)
-    
+
     # Invalidate cached zips whenever source directory contents change
     _invalidate_zips(Path(temp_dir))
-    
+
     # Only create a new session entry for brand new sessions
     if is_new_session:
         session_token = generate_session_token()
@@ -265,125 +339,193 @@ async def process_images(
             "token_hash": token_hash, "download_count": 0, "access_count": 0
         }
         temp_dirs[session_id] = session_data
-        save_session_metadata(session_id, session_data)
+        await run_in_threadpool(save_session_metadata, session_id, session_data)
     else:
-        # Reuse the existing token so the frontend's Authorization header stays valid
         session_token = None  # Frontend already has it from chunk 1
         if session_id in temp_dirs:
-            save_session_metadata(session_id, temp_dirs[session_id])
-    
-    current_time = time.time()
-    expired = [sid for sid, data in temp_dirs.items() if current_time - data["created_at"] > SESSION_TTL_SECONDS]
-    for sid in expired: cleanup_session(sid)
-    
+            await run_in_threadpool(save_session_metadata, session_id, temp_dirs[session_id])
+
+    # Rate-gated session expiry — runs at most once per minute, not on every request
+    _maybe_cleanup_expired_sessions()
+
+    has_processed = len(processed) > 0
+    has_failed = len(failed) > 0
+
     response_data = {
         "session_id": session_id,
         "session_token": session_token,
         "processed": processed,
         "failed": failed,
         "review": review,
-        "has_processed": len(processed) > 0,
-        "has_failed": len(failed) > 0,
+        "has_processed": has_processed,
+        "has_failed": has_failed,
         "has_review": len(review) > 0,
     }
-    if os.listdir(output_dir): response_data["download_url"] = f"/api/download/{session_id}"
-    if os.listdir(failed_dir): response_data["failed_download_url"] = f"/api/download-failed/{session_id}"
-    
+    if has_processed:
+        response_data["download_url"] = f"/api/download/{session_id}"
+    if has_failed:
+        response_data["failed_download_url"] = f"/api/download-failed/{session_id}"
+
     return response_data
 
-@router.get("/api/download/{session_id}")
-async def download_zip(session_id: str, background_tasks: BackgroundTasks, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
+
+@router.post("/api/issue-download-token/{session_id}")
+async def issue_download_token(
+    session_id: str,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    """Issue a short-lived (120s) single-use download token for URL-based file downloads.
+    Requires header-based session authentication. The returned token may be appended
+    to download URLs as ?dl_token=<token> for browser anchor downloads.
+    """
     validate_session_id(session_id)
-    session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
-    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION: raise HTTPException(status_code=429, detail="Download limit exceeded")
-    
+    validate_session_token(session_id, authorization, allow_preview=False)
+    token = _issue_download_token(session_id)
+    return {"download_token": token, "expires_in_seconds": _DOWNLOAD_TOKEN_TTL_S}
+
+
+@router.get("/api/download/{session_id}")
+async def download_zip(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    dl_token: Optional[str] = None,
+):
+    validate_session_id(session_id)
+
+    # Accept either header-based auth or a single-use download token.
+    # The dl_token is short-lived and single-use — it is NOT the session token.
+    if dl_token:
+        if not _consume_download_token(dl_token, session_id):
+            raise HTTPException(status_code=403, detail="Invalid or expired download token")
+        # Retrieve session without token verification (token already consumed above)
+        from core.security import temp_dirs as _td
+        session = _td.get(session_id)
+        if not session:
+            session = restore_session_from_disk(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found or expired")
+    else:
+        session = validate_session_token(session_id, authorization, allow_preview=False)
+
+    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Download limit exceeded")
+
     session["download_count"] += 1
-    save_session_metadata(session_id, session)
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     base_path = Path(session["path"])
     zip_path = base_path / "output.zip"
     output_dir = base_path / "output"
-    
+
     try:
         zip_path = zip_path.resolve()
-        if not str(zip_path).startswith(str(base_path.resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid path")
-    
-    # Check if existing archive is still current; regenerate if outdated or missing
+        if not str(zip_path).startswith(str(base_path.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
     if not _is_zip_current(zip_path, output_dir):
-        if not output_dir.exists() or not any(output_dir.iterdir()):
+        if not output_dir.exists() or not any(f for f in output_dir.iterdir() if f.is_file()):
             raise HTTPException(status_code=404, detail="No files to zip")
-            
-        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as zf:
-            for f in output_dir.iterdir():
-                if f.is_file():
-                    zf.write(str(f), f.name)
-                
+        await run_in_threadpool(_build_zip_atomically, zip_path, output_dir)
+
     return FileResponse(str(zip_path), filename="saree_organized.zip", media_type="application/zip")
 
+
 @router.get("/api/download-failed/{session_id}")
-async def download_failed_zip(session_id: str, background_tasks: BackgroundTasks, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
+async def download_failed_zip(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    dl_token: Optional[str] = None,
+):
     validate_session_id(session_id)
-    session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
-    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION: raise HTTPException(status_code=429, detail="Download limit exceeded")
-    
+
+    if dl_token:
+        if not _consume_download_token(dl_token, session_id):
+            raise HTTPException(status_code=403, detail="Invalid or expired download token")
+        from core.security import temp_dirs as _td
+        session = _td.get(session_id)
+        if not session:
+            session = restore_session_from_disk(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found or expired")
+    else:
+        session = validate_session_token(session_id, authorization, allow_preview=False)
+
+    if session["download_count"] >= MAX_DOWNLOADS_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Download limit exceeded")
+
     session["download_count"] += 1
-    save_session_metadata(session_id, session)
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     base_path = Path(session["path"])
     zip_path = base_path / "failed.zip"
     failed_dir = base_path / "failed"
-    
+
     try:
         zip_path = zip_path.resolve()
-        if not str(zip_path).startswith(str(base_path.resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid path")
-    
-    # Check if existing archive is still current; regenerate if outdated or missing
+        if not str(zip_path).startswith(str(base_path.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
     if not _is_zip_current(zip_path, failed_dir):
-        if not failed_dir.exists() or not any(failed_dir.iterdir()):
+        if not failed_dir.exists() or not any(f for f in failed_dir.iterdir() if f.is_file()):
             raise HTTPException(status_code=404, detail="No failed files to zip")
-            
-        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as zf:
-            for f in failed_dir.iterdir():
-                if f.is_file():
-                    zf.write(str(f), f.name)
-                
+        await run_in_threadpool(_build_zip_atomically, zip_path, failed_dir)
+
     return FileResponse(str(zip_path), filename="failed_images.zip", media_type="application/zip")
+
 
 @router.get("/api/preview/{session_id}/{filename}")
 async def get_preview(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
     validate_session_id(session_id)
     safe_filename = validate_filename(filename)
     session = validate_session_token(session_id, authorization, query_token=token, allow_preview=True)
-    
+
     session["access_count"] += 1
-    save_session_metadata(session_id, session)
-    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION: raise HTTPException(status_code=429, detail="Too many requests")
+    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Too many requests")
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     file_path = Path(session["path"]) / "output" / safe_filename
-    
+
     try:
         file_path = file_path.resolve()
-        if not str(file_path).startswith(str((Path(session["path"]) / "output").resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid file path")
-    if not file_path.exists(): raise HTTPException(status_code=404, detail="Image not found")
+        if not str(file_path).startswith(str((Path(session["path"]) / "output").resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(str(file_path))
+
 
 @router.get("/api/preview-failed/{session_id}/{filename}")
 async def get_failed_preview(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
     validate_session_id(session_id)
     safe_filename = validate_filename(filename)
     session = validate_session_token(session_id, authorization, query_token=token, allow_preview=True)
-    
+
     session["access_count"] += 1
-    save_session_metadata(session_id, session)
-    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION: raise HTTPException(status_code=429, detail="Too many requests")
+    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Too many requests")
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     file_path = Path(session["path"]) / "failed" / safe_filename
-    
+
     try:
         file_path = file_path.resolve()
-        if not str(file_path).startswith(str((Path(session["path"]) / "failed").resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid file path")
-    if not file_path.exists(): raise HTTPException(status_code=404, detail="Failed image not found")
+        if not str(file_path).startswith(str((Path(session["path"]) / "failed").resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Failed image not found")
     return FileResponse(str(file_path))
+
 
 @router.get("/api/preview-review/{session_id}/{filename}")
 async def get_review_preview(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
@@ -392,15 +534,20 @@ async def get_review_preview(session_id: str, filename: str, authorization: Opti
     session = validate_session_token(session_id, authorization, query_token=token, allow_preview=True)
 
     session["access_count"] += 1
-    save_session_metadata(session_id, session)
-    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION: raise HTTPException(status_code=429, detail="Too many requests")
+    if session["access_count"] > MAX_ACCESS_COUNT_PER_SESSION:
+        raise HTTPException(status_code=429, detail="Too many requests")
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     file_path = Path(session["path"]) / "review" / safe_filename
 
     try:
         file_path = file_path.resolve()
-        if not str(file_path).startswith(str((Path(session["path"]) / "review").resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid file path")
-    if not file_path.exists(): raise HTTPException(status_code=404, detail="Image not found")
+        if not str(file_path).startswith(str((Path(session["path"]) / "review").resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(str(file_path))
 
 
@@ -412,7 +559,7 @@ async def confirm_review(session_id: str, request: ConfirmReviewRequest, authori
     is trusted over anything the scanner proposed.
     """
     validate_session_id(session_id)
-    session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
+    session = validate_session_token(session_id, authorization, allow_preview=False)
 
     base = Path(session["path"])
     review_dir, output_dir = base / "review", base / "output"
@@ -434,11 +581,12 @@ async def confirm_review(session_id: str, request: ConfirmReviewRequest, authori
     _invalidate_zips(base)
     logger.info("Review confirmed by user: %s -> %s", safe_filename, new_name)
 
+    remaining = len([f for f in os.listdir(review_dir) if not f.startswith(".")])
     return {
         "success": True,
         "new_name": new_name,
         "preview_url": f"/api/preview/{session_id}/{new_name}",
-        "remaining_review": len(os.listdir(review_dir)),
+        "remaining_review": remaining,
     }
 
 
@@ -446,64 +594,77 @@ async def confirm_review(session_id: str, request: ConfirmReviewRequest, authori
 async def download_single_image(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
     validate_session_id(session_id)
     safe_filename = validate_filename(filename)
-    session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
+    session = validate_session_token(session_id, authorization, allow_preview=False)
     session["access_count"] += 1
-    save_session_metadata(session_id, session)
-    
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     file_path = Path(session["path"]) / "output" / safe_filename
     try:
         file_path = file_path.resolve()
-        if not str(file_path).startswith(str((Path(session["path"]) / "output").resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid file path")
-    
-    if not file_path.exists(): raise HTTPException(status_code=404, detail="File not found")
+        if not str(file_path).startswith(str((Path(session["path"]) / "output").resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(file_path), filename=safe_filename, media_type="application/octet-stream", headers={"Content-Disposition": f"attachment; filename={safe_filename}"})
+
 
 @router.get("/api/download-single-failed/{session_id}/{filename}")
 async def download_single_failed_image(session_id: str, filename: str, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
     validate_session_id(session_id)
     safe_filename = validate_filename(filename)
-    session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
+    session = validate_session_token(session_id, authorization, allow_preview=False)
     session["access_count"] += 1
-    save_session_metadata(session_id, session)
-    
+    await run_in_threadpool(save_session_metadata, session_id, session)
+
     file_path = Path(session["path"]) / "failed" / safe_filename
     try:
         file_path = file_path.resolve()
-        if not str(file_path).startswith(str((Path(session["path"]) / "failed").resolve())): raise HTTPException(status_code=403, detail="Access denied")
-    except Exception: raise HTTPException(status_code=400, detail="Invalid file path")
-    
-    if not file_path.exists(): raise HTTPException(status_code=404, detail="File not found")
+        if not str(file_path).startswith(str((Path(session["path"]) / "failed").resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(file_path), filename=safe_filename, media_type="application/octet-stream", headers={"Content-Disposition": f"attachment; filename={safe_filename}"})
+
 
 @router.post("/api/retry/{session_id}")
 async def retry_failed_images(session_id: str, request: RetryRequest, authorization: Optional[str] = Header(None, alias="Authorization"), token: Optional[str] = None):
     validate_session_id(session_id)
-    session = validate_session_token(session_id, authorization, query_token=token, allow_preview=False)
-    
+    session = validate_session_token(session_id, authorization, allow_preview=False)
+
     temp_dir = session["path"]
     failed_dir = os.path.join(temp_dir, "failed")
     output_dir = os.path.join(temp_dir, "output")
-    
-    if not os.path.exists(failed_dir): raise HTTPException(status_code=404, detail="No failed images found")
-    
+
+    if not os.path.exists(failed_dir):
+        raise HTTPException(status_code=404, detail="No failed images found")
+
     review_dir = os.path.join(temp_dir, "review")
     os.makedirs(review_dir, exist_ok=True)
 
     retried_processed = []
     retried_review = []
     files_to_retry = request.filenames
-    if not files_to_retry: raise HTTPException(status_code=400, detail="No filenames provided")
+    if not files_to_retry:
+        raise HTTPException(status_code=400, detail="No filenames provided")
 
+    still_failed_count = 0
     for filename in files_to_retry:
         try:
             safe_filename = validate_filename(filename)
             file_path = os.path.join(failed_dir, safe_filename)
-            if not os.path.exists(file_path): continue
-                
-            with open(file_path, "rb") as f: contents = f.read()
+            if not os.path.exists(file_path):
+                continue
+
+            with open(file_path, "rb") as f:
+                contents = f.read()
             img_ext = os.path.splitext(safe_filename)[1].lower()
-            
+
             # Escalate: re-scan at a higher resolution. Repeating the original
             # scan would re-run deterministic work and return the same answer.
             result = await scan_in_thread(contents, max_dim=RETRY_SCAN_DIMENSION)
@@ -511,7 +672,8 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
             if result.is_confident:
                 clean_name = standardize_filename(result.code)
                 output_path, new_name = _unique_path(output_dir, f"{clean_name}{img_ext}")
-                with open(output_path, "wb") as f_out: f_out.write(contents)
+                with open(output_path, "wb") as f_out:
+                    f_out.write(contents)
                 os.remove(file_path)
 
                 retried_processed.append({
@@ -523,7 +685,8 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
                 # Now readable but still not trustworthy: promote it out of the
                 # failed pile into review rather than renaming on a guess.
                 review_path, review_name = _unique_path(review_dir, safe_filename)
-                with open(review_path, "wb") as f_out: f_out.write(contents)
+                with open(review_path, "wb") as f_out:
+                    f_out.write(contents)
                 os.remove(file_path)
 
                 retried_review.append({
@@ -537,26 +700,36 @@ async def retry_failed_images(session_id: str, request: RetryRequest, authorizat
                     ],
                     "preview_url": f"/api/preview-review/{session_id}/{review_name}"
                 })
+            else:
+                still_failed_count += 1
         except Exception as e:
             logger.error("Error retrying file %s: %s", filename, e)
+            still_failed_count += 1
 
     _invalidate_zips(Path(temp_dir))
 
-    if retried_processed:
-        # Dynamic zip generation has been delegated to the download endpoints
-        pass
+    has_output = os.path.isdir(output_dir) and any(
+        f for f in os.listdir(output_dir) if not f.startswith(".")
+    )
+    has_failed = os.path.isdir(failed_dir) and any(
+        f for f in os.listdir(failed_dir) if not f.startswith(".")
+    )
+    review_count = len([
+        f for f in os.listdir(review_dir) if not f.startswith(".")
+    ]) if os.path.isdir(review_dir) else 0
 
     return {
         "success": True,
         "retried_processed": retried_processed,
         "retried_review": retried_review,
-        "still_failed_count": len(os.listdir(failed_dir)),
-        "review_count": len(os.listdir(review_dir)),
-        "download_url": f"/api/download/{session_id}" if os.listdir(output_dir) else None,
-        "failed_download_url": f"/api/download-failed/{session_id}" if os.listdir(failed_dir) else None,
-        "has_processed": len(os.listdir(output_dir)) > 0,
-        "has_failed": len(os.listdir(failed_dir)) > 0
+        "still_failed_count": still_failed_count,
+        "review_count": review_count,
+        "download_url": f"/api/download/{session_id}" if has_output else None,
+        "failed_download_url": f"/api/download-failed/{session_id}" if has_failed else None,
+        "has_processed": has_output,
+        "has_failed": has_failed,
     }
+
 
 @router.get("/health")
 async def health():

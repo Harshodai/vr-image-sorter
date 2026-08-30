@@ -12,9 +12,10 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Pre-warm OCR engine on server boot to avoid user-facing cold start delay
-    logger.info("Server starting up. Pre-warming RapidOCR engine...")
-    ocr_pool.warm_up(count=1)
-    logger.info("RapidOCR engine ready.")
+    logger.info("Server starting up. Pre-warming RapidOCR engine pool...")
+    from core.config import OCR_POOL_SIZE
+    ocr_pool.warm_up(count=OCR_POOL_SIZE)
+    logger.info("RapidOCR engine pool ready (%d engine(s)).", OCR_POOL_SIZE)
     yield
     logger.info("Server shutting down.")
 

@@ -15,7 +15,16 @@ VR_RX = re.compile(r"VR\d{4,8}(?!\d)")
 VR_PREFIX_RX = re.compile(r"VR\d{1,6}$")
 DIGITS_ONLY_RX = re.compile(r"^\d{1,6}$")
 
+# Valid full VR code suffix lengths (digits after "VR"): 4–8.
+# For crease-stitch candidates, we validate the merged digit count before
+# deciding whether the candidate is trusted or routes to review.
+_TRUSTED_VR_DIGIT_LENGTHS = frozenset(range(4, 9))  # 4,5,6,7,8
+
 _DIGIT_MAP = str.maketrans("OoIl|", "00111")
+
+# Maximum number of boxes to consider in the inner stitch loop to avoid
+# O(n²) blowup on busy labels with many text regions.
+_MAX_STITCH_INNER = 20
 
 
 def _normalise(text: str, substitute: bool) -> str:
@@ -23,7 +32,7 @@ def _normalise(text: str, substitute: bool) -> str:
     # Common OCR misread: '/' or '\' seen instead of 'V' before 'R'
     clean = re.sub(r"[/\\]R(\d)", r"VR\1", clean)
     # Fix VR space digits e.g. "VR 173873" -> "VR173873"
-    clean = re.sub(r"\bVR[\s\-_.:]+(\d)", r"VR\1", clean)
+    clean = re.sub(r"\bVR[\s\-_.:]+(\\d)", r"VR\1", clean)
     if substitute:
         clean = clean.translate(_DIGIT_MAP)
     return clean
@@ -36,7 +45,7 @@ def _extract(text: str) -> list[tuple[str, bool]]:
     Returns list of (code, substituted).
     """
     found: list[tuple[str, bool]] = []
-    
+
     # 1. First test whitespace/delimiter-separated tokens
     tokens = re.split(r"[\s,;|/]+", text)
     for tok in tokens:
@@ -47,7 +56,7 @@ def _extract(text: str) -> list[tuple[str, bool]]:
         if m_strict:
             found.append((m_strict.group(0), False))
             continue
-            
+
         clean_loose = _normalise(tok, substitute=True)
         m_loose = VR_RX.search(clean_loose)
         if m_loose:
@@ -95,12 +104,16 @@ def _box_center_and_height(box) -> tuple[float, float, float, float, float] | No
     return None
 
 
-def _stitch_crease_boxes(ocr_result) -> list[tuple[str, float]]:
+def _stitch_crease_boxes(ocr_result) -> list[tuple[str, float, bool]]:
     """
     Stitch adjacent text boxes on the same horizontal baseline that were split
     by a fold/crease (e.g., Box1='VR1738', Box2='73' -> 'VR173873').
+
+    Returns list of (code, score, substituted).
+    Stitched candidates are marked substituted=True when the merged digit count
+    is not a known ERP SKU length (4–8 digits after VR), routing them to review.
     """
-    stitched: list[tuple[str, float]] = []
+    stitched: list[tuple[str, float, bool]] = []
     if not ocr_result:
         return stitched
 
@@ -115,18 +128,21 @@ def _stitch_crease_boxes(ocr_result) -> list[tuple[str, float]]:
             m_prefix = VR_PREFIX_RX.search(norm1)
             if not m_prefix:
                 continue
-                
+
             b1_info = _box_center_and_height(box1)
             if not b1_info:
                 continue
             cx1, cy1, h1, left1, right1 = b1_info
             prefix_code = m_prefix.group(0)
-            
-            # Look for adjacent numeric box to the right on the same horizontal line
-            for j in range(n):
-                if i == j:
-                    continue
-                line2 = ocr_result[j]
+
+            # Look for adjacent numeric box to the right on the same horizontal line.
+            # Limit inner loop to avoid O(n²) on busy labels.
+            inner_candidates = [
+                ocr_result[j] for j in range(n)
+                if j != i
+            ][:_MAX_STITCH_INNER]
+
+            for line2 in inner_candidates:
                 if len(line2) < 3:
                     continue
                 box2, text2, score2 = line2[0], line2[1], line2[2]
@@ -134,25 +150,34 @@ def _stitch_crease_boxes(ocr_result) -> list[tuple[str, float]]:
                 m_digits = DIGITS_ONLY_RX.match(norm2) or re.match(r"^(\d{1,6})\b", norm2)
                 if not m_digits:
                     continue
-                    
+
                 b2_info = _box_center_and_height(box2)
                 if not b2_info:
                     continue
                 cx2, cy2, h2, left2, right2 = b2_info
-                
+
                 max_h = max(h1, h2)
                 h_gap = left2 - right1
                 # Same horizontal baseline: vertical difference is small relative to text height,
                 # box2 is to the right of box1, and horizontal edge-to-edge gap is bounded
                 if abs(cy1 - cy2) <= max_h * 0.75 and cx2 > cx1 and -max_h * 0.5 <= h_gap <= max_h * 2.0:
-                    digits = m_digits.group(1) if (hasattr(m_digits, 'groups') and m_digits.groups()) else (m_digits.group(0) if hasattr(m_digits, 'group') else norm2)
+                    digits = m_digits.group(1) if m_digits.lastindex else m_digits.group(0)
                     merged = prefix_code + digits
                     m_full = VR_RX.search(merged)
                     if m_full:
                         combined_code = m_full.group(0)
                         combined_score = min(float(score1), float(score2))
-                        logger.debug("Crease stitch hit: %s + %s -> %s (conf: %.3f)", prefix_code, digits, combined_code, combined_score)
-                        stitched.append((combined_code, combined_score))
+                        # Validate digit count against known ERP SKU lengths.
+                        # VR code = "VR" + N digits. len("VR") = 2.
+                        digit_count = len(combined_code) - 2
+                        # Trust the stitch only when digit count is unambiguously valid.
+                        is_trusted = digit_count in _TRUSTED_VR_DIGIT_LENGTHS
+                        substituted = not is_trusted
+                        logger.debug(
+                            "Crease stitch hit: %s + %s -> %s (conf: %.3f, trusted: %s)",
+                            prefix_code, digits, combined_code, combined_score, is_trusted
+                        )
+                        stitched.append((combined_code, combined_score, substituted))
         except Exception as e:
             logger.debug("Error in box stitching pass: %s", e)
     return stitched
@@ -174,8 +199,6 @@ def _settled(candidates: list[Candidate]) -> bool:
               if c.confidence >= OCR_EARLY_EXIT_CONFIDENCE and not c.substituted]
     if not strong:
         return False
-    # If the strongest read has at least 5 digits, prioritize it over partial fragments
-    best_code = strong[0].code
     return len({c.code for c in strong}) == 1
 
 
@@ -203,9 +226,9 @@ def _ocr_single_pass(engine, image, angle: int, source: str) -> list[Candidate]:
 
     # 2. Check for stitched crease boxes (e.g. VR1738 + 73)
     stitched_hits = _stitch_crease_boxes(ocr_result)
-    for code, score in stitched_hits:
+    for code, score, substituted in stitched_hits:
         if not any(c.code == code and c.rotation == angle for c in found):
-            found.append(Candidate(code, score, "ocr", source, angle, False))
+            found.append(Candidate(code, score, "ocr", source, angle, substituted))
 
     # 3. Whole-result concatenation fallback for multiline splits
     valid_lines = [line[1] for line in ocr_result if len(line) >= 2]
@@ -214,7 +237,8 @@ def _ocr_single_pass(engine, image, angle: int, source: str) -> list[Candidate]:
     for code, substituted in hits:
         if not any(c.code == code and c.rotation == angle for c in found):
             scores = [float(line[2]) for line in ocr_result if len(line) >= 3] or [0.0]
-            found.append(Candidate(code, min(scores), "ocr", source, angle, True))
+            # Use the actual substituted flag from _extract; do NOT hard-code True.
+            found.append(Candidate(code, min(scores), "ocr", source, angle, substituted))
 
     return found
 
@@ -240,7 +264,7 @@ def scan_ocr(image, roi_image=None, source: str = "full") -> list[Candidate]:
                 roi_image = cv2.resize(
                     roi_image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC
                 )
-            
+
             # 1a. Fast upright pass on ROI (0°)
             roi_0 = _ocr_single_pass(engine, roi_image, 0, "roi")
             candidates.extend(roi_0)

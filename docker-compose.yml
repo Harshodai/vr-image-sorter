@@ -10,8 +10,14 @@ services:
     ports:
       - "${PORT:-8001}:8000"
     volumes:
-      - ./temp_logs:/app/logs # Optional persistence
+      - ./temp_logs:/app/temp_logs
+    environment:
+      # SESSION_SECRET_KEY: override with a strong random secret in production.
+      # Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))"
+      - SESSION_SECRET_KEY=${SESSION_SECRET_KEY:-vr-sorter-local-docker-secret-change-in-prod-32x}
+      - APP_ENV=${APP_ENV:-development}
     restart: always
+
 
   frontend:
     build:

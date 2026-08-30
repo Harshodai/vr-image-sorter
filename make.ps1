@@ -121,7 +121,9 @@ switch ($Target.ToLower()) {
 
     'up' {
         docker compose up --build -d
-        Write-Host 'frontend http://localhost:8080   backend http://localhost:8000/docs'
+        $port   = if ($env:PORT)    { $env:PORT }    else { '8001' }
+        $uiPort = if ($env:UI_PORT) { $env:UI_PORT } else { '8088' }
+        Write-Host "frontend http://localhost:$uiPort   backend http://localhost:$port/docs"
     }
     'down'    { docker compose down }
     'logs'    { docker compose logs -f }
