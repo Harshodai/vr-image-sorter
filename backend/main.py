@@ -1,6 +1,7 @@
 import os
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.logger import logger
@@ -55,5 +56,33 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Include the modular routes
+# Include the modular API routes
 app.include_router(api_router)
+
+# Mount static frontend files if built static directory exists
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if not os.path.isdir(STATIC_DIR):
+    alt_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist")
+    if os.path.isdir(alt_dist):
+        STATIC_DIR = alt_dist
+
+if os.path.isdir(STATIC_DIR):
+    assets_dir = os.path.join(STATIC_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="static-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa_frontend(full_path: str):
+        # Do not intercept API, health, docs routes
+        if full_path.startswith("api/") or full_path in ("health", "docs", "redoc", "openapi.json"):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        target_file = os.path.join(STATIC_DIR, full_path)
+        if full_path and os.path.isfile(target_file):
+            return FileResponse(target_file)
+
+        index_file = os.path.join(STATIC_DIR, "index.html")
+        if os.path.isfile(index_file):
+            return FileResponse(index_file)
+        raise HTTPException(status_code=404, detail="Frontend assets not found")
+

@@ -15,7 +15,7 @@ declare global {
 const API_URL_RAW =
   (typeof window !== 'undefined' && window.__RUNTIME_CONFIG__?.API_URL) ||
   import.meta.env.VITE_API_URL ||
-  'http://localhost:8000';
+  (typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://localhost:8000');
 // Ensure the URL does not end with a trailing slash to avoid double slashes in paths
 const API_BASE_URL = API_URL_RAW.endsWith('/') ? API_URL_RAW.slice(0, -1) : API_URL_RAW;
 
