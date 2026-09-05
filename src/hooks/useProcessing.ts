@@ -103,22 +103,61 @@ export function getSessionToken(): string | null {
 }
 
 
-// Helper for authenticated fetch
+// Helper for authenticated fetch. Routed through fetchWithRetry so every
+// authenticated call — downloads, previews, retry, confirm — gets the same
+// resilience to a transient network blip that the chunked upload path
+// already had. Previously only /api/process retried; a one-shot download
+// click that hit a momentary network hiccup failed immediately with no
+// second attempt, surfaced to the user as "Download failed. Please try
+// again." with no actual retry ever happening.
 export async function authenticatedFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
   if (sessionToken) {
     headers.set('Authorization', `Bearer ${sessionToken}`);
   }
-  return fetch(url, { ...options, headers });
+  return fetchWithRetry(url, { ...options, headers });
 }
 
-// Helper to get authenticated blob URL for downloads with custom filename
+// Helper to get authenticated blob URL for downloads with custom filename.
+//
+// A ZIP of a real batch can be hundreds of MB to several GB, and the failure
+// most likely to actually happen isn't the initial connection (which
+// authenticatedFetch already retries) — it's the network dropping partway
+// through reading that much response body, which surfaces as a TypeError out
+// of response.blob(), not out of fetch() itself. That happened outside any
+// retry, so one mid-download hiccup on a big ZIP meant an immediate
+// "Download failed. Please try again." with no actual retry attempted. The
+// whole fetch+read is now retried as one unit for exactly that case, while a
+// real rejection (403/404/429 — bad token, expired session, quota) is not
+// retried, since trying again cannot fix any of those.
 export async function getAuthenticatedDownload(url: string, filename?: string): Promise<void> {
-  const response = await authenticatedFetch(url);
-  if (!response.ok) {
-    throw new Error('Download failed');
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  let blob: Blob | null = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await authenticatedFetch(url);
+      if (!response.ok) {
+        throw new Error(`Download failed (HTTP ${response.status})`);
+      }
+      blob = await response.blob();
+      break;
+    } catch (err) {
+      lastErr = err;
+      // Only a transport-level failure (connection dropped mid-transfer) is
+      // worth retrying; a completed response with a bad status is a real
+      // rejection, and Error (thrown above) is not a TypeError.
+      if (!(err instanceof TypeError) || attempt === maxAttempts - 1) {
+        throw err;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+    }
   }
-  const blob = await response.blob();
+  if (!blob) {
+    throw lastErr instanceof Error ? lastErr : new Error('Download failed');
+  }
+
   const blobUrl = URL.createObjectURL(blob);
 
   // Create a temporary link and click it
