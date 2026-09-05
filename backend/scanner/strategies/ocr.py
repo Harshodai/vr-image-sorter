@@ -32,7 +32,14 @@ def _normalise(text: str, substitute: bool) -> str:
     # Common OCR misread: '/' or '\' seen instead of 'V' before 'R'
     clean = re.sub(r"[/\\]R(\d)", r"VR\1", clean)
     # Fix VR space digits e.g. "VR 173873" -> "VR173873"
-    clean = re.sub(r"\bVR[\s\-_.:]+(\\d)", r"VR\1", clean)
+    # NOTE: previously r"...(\\d)" — a raw string's \\d is a literal
+    # backslash followed by 'd', not the digit class, so this never matched
+    # anything. It happened to cause no visible failures because the
+    # whitespace-stripping fallback a few lines down in _extract() already
+    # collapses "VR 173873" to "VR173873" before matching. Fixed to \d so
+    # this line actually does what the comment says instead of relying on
+    # a fallback that isn't guaranteed to run for every caller.
+    clean = re.sub(r"\bVR[\s\-_.:]+(\d)", r"VR\1", clean)
     if substitute:
         clean = clean.translate(_DIGIT_MAP)
     return clean
@@ -249,10 +256,18 @@ def scan_ocr(image, roi_image=None, source: str = "full") -> list[Candidate]:
     Fast-path:
       1. Primary ROI / crop @ 0° -> if clean candidate found >= threshold, early-exits in <0.4s!
       2. If not settled, tries ROI rotations (180°, 90°, 270°).
-      3. Fallback: full image @ 0°, then full image rotations.
+      3. Fallback: full image @ 0°, then full image rotations. Skipped when
+         `roi_image` is the exact same array as `image` (the pipeline's
+         label-crop call pattern) — step 1 already scanned it at every
+         orientation, so step 3 would repeat identical passes on identical
+         pixels. Measured: this was doubling OCR time on every crop that did
+         not settle immediately (25 forward passes / 13.5s for one image that
+         should have taken 13 passes / ~7s).
     """
     engine = ocr_pool.acquire()
     candidates: list[Candidate] = []
+    # Captured before roi_image is reassigned below by the resize step.
+    roi_is_same_object_as_image = roi_image is image
     try:
         target_w = ROI_TARGET_WIDTH
 
@@ -278,6 +293,10 @@ def scan_ocr(image, roi_image=None, source: str = "full") -> list[Candidate]:
                 if _settled(candidates):
                     logger.debug("Settled on ROI @ %d° (%s)", angle, candidates[0].code)
                     return candidates
+
+        if roi_is_same_object_as_image:
+            # Nothing left to learn from re-scanning the identical pixels.
+            return candidates
 
         # Step 2: Prepare base image (upscale if small crop)
         h_img, w_img = image.shape[:2]

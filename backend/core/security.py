@@ -43,7 +43,15 @@ else:
 # excluded: it is world-writable on most OSes and must not be used as a
 # restore source — an attacker-controlled session directory there could be
 # used to inject arbitrary session metadata.
+#
+# The canonical path is core.config.SESSION_STORAGE_DIR (an absolute path
+# anchored to the backend package, not the process CWD). The bare relative
+# names are kept only so sessions written by an already-deployed instance
+# before this fix aren't orphaned; new sessions always land in the canonical
+# path, computed identically here and in routes.py.
+from core.config import SESSION_STORAGE_DIR
 _TRUSTED_SESSION_BASES = [
+    SESSION_STORAGE_DIR,
     "temp_logs",
     "/app/temp_logs",
     "./temp_logs",

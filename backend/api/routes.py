@@ -24,7 +24,8 @@ from starlette.concurrency import run_in_threadpool
 from core.config import (
     MAX_BATCH_SIZE, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
     MAX_IMAGE_DIMENSION, BATCH_CONCURRENCY, MAX_DOWNLOADS_PER_SESSION,
-    MAX_ACCESS_COUNT_PER_SESSION, SESSION_TTL_SECONDS, SCAN_TIMEOUT_SECONDS, RETRY_SCAN_DIMENSION
+    MAX_ACCESS_COUNT_PER_SESSION, SESSION_TTL_SECONDS, SCAN_TIMEOUT_SECONDS,
+    RETRY_SCAN_DIMENSION, SESSION_STORAGE_DIR
 )
 from core.security import (
     validate_filename, validate_session_id, validate_session_token,
@@ -226,29 +227,49 @@ async def process_images(
     else:
         is_new_session = True
         session_id = str(uuid.uuid4())
-        base_dir = "temp_logs" if os.path.exists("temp_logs") else ("/app/temp_logs" if os.path.exists("/app/temp_logs") else tempfile.gettempdir())
-        temp_dir = os.path.join(base_dir, session_id)
+        temp_dir = os.path.join(SESSION_STORAGE_DIR, session_id)
     output_dir = os.path.join(temp_dir, "output")
     failed_dir = os.path.join(temp_dir, "failed")
     review_dir = os.path.join(temp_dir, "review")
     for d in (output_dir, failed_dir, review_dir):
         os.makedirs(d, exist_ok=True)
 
-    # Validate files sequentially: read one at a time to bound peak memory.
-    # File contents are retained in the collection for later processing, so
-    # peak memory is bounded by MAX_TOTAL_SIZE rather than MAX_FILE_SIZE.
+    processed = []
+    failed = []
+    review = []
+
+    # Validate files individually. A single bad file (wrong extension, over
+    # the per-file size cap, corrupted/oversized image) used to raise an
+    # HTTPException here, which aborted THIS ENTIRE REQUEST — up to
+    # MAX_BATCH_SIZE files, or every image left in the chunk from the
+    # frontend's perspective — with the good files in the same chunk silently
+    # never processed at all (not even recorded as failed). One malformed
+    # image could make a whole batch vanish. Each file is now judged on its
+    # own: a rejection lands it in `failed` with a reason and the rest of the
+    # chunk continues. MAX_TOTAL_SIZE remains a whole-request guard since it
+    # protects server memory, not any single file's validity.
     validated_files = []
     total_size = 0
 
     for file in files:
-        ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
+        filename = file.filename or "unnamed_file"
+        ext = os.path.splitext(filename)[1].lower() if filename else ""
         if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"Invalid file type for '{file.filename}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+            failed.append({
+                "original_name": filename,
+                "reason": f"unsupported file type '{ext or 'unknown'}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+            })
+            continue
 
         contents = await file.read()
         file_size = len(contents)
         if file_size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail=f"File exceeds {MAX_FILE_SIZE // (1024*1024)}MB maximum limit")
+            failed.append({
+                "original_name": filename,
+                "reason": f"file is {file_size // (1024*1024)}MB, exceeds the "
+                          f"{MAX_FILE_SIZE // (1024*1024)}MB per-file limit",
+            })
+            continue
 
         total_size += file_size
         if total_size > MAX_TOTAL_SIZE:
@@ -257,18 +278,25 @@ async def process_images(
         try:
             with Image.open(io.BytesIO(contents)) as image:
                 width, height = image.size
-                if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
-                    raise HTTPException(status_code=400, detail="Image dimensions exceed limit")
-        except HTTPException:
-            raise
+            if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+                raise ValueError("dimensions exceed limit")
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid or corrupted image")
+            safe_filename = validate_filename(filename)
+            failed_path, failed_name = _unique_path(failed_dir, safe_filename)
+            try:
+                with open(failed_path, "wb") as f:
+                    f.write(contents)
+                preview_url = f"/api/preview-failed/{session_id}/{failed_name}"
+            except Exception:
+                preview_url = None
+            failed.append({
+                "original_name": filename,
+                "reason": "invalid, corrupted, or oversized image",
+                "preview_url": preview_url,
+            })
+            continue
 
-        validated_files.append({"filename": file.filename, "contents": contents, "ext": ext})
-
-    processed = []
-    failed = []
-    review = []
+        validated_files.append({"filename": filename, "contents": contents, "ext": ext})
 
     batch_size = len(validated_files)
     logger.info("Batch processing started: %d file(s), concurrency limit=%d", batch_size, BATCH_CONCURRENCY)

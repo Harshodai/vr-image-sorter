@@ -5,6 +5,27 @@ from typing import List
 # Application Config
 PORT = int(os.environ.get("PORT", 8080))
 
+# Absolute, CWD-independent home for session data (uploaded/output/failed/
+# review files and the .session_meta.json restore record).
+#
+# This used to be a bare relative "temp_logs", resolved separately in
+# routes.py (session creation) and security.py (session restoration) against
+# whatever the process's current working directory happened to be. Every
+# local launch path (`npm start`, `make dev-backend`) starts uvicorn with
+# cwd=backend/, where "backend/temp_logs" never exists on a fresh checkout, so
+# every local session silently fell back to tempfile.gettempdir() — a path
+# security.py explicitly excludes from restoration because it is
+# world-writable. The very next backend restart (uvicorn --reload picking up
+# a saved file, or just stopping and starting again) then made the session
+# permanently unrecoverable: "Session not found or expired" on the next
+# download click, which the frontend shows as "Download failed. Please try
+# again." Anchoring this to the backend package's own location makes it
+# correct regardless of CWD, and it happens to land on /app/temp_logs inside
+# the Docker image for free, since that is where the code lives there too.
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SESSION_STORAGE_DIR = os.environ.get("SESSION_STORAGE_DIR") or os.path.join(_BACKEND_DIR, "temp_logs")
+os.makedirs(SESSION_STORAGE_DIR, exist_ok=True)
+
 # Google Drive Config
 DRIVE_FOLDER_ID = "1S2x4wTqO-9Lq_Q0Zp0Yk-9p15c1y-JvS"
 SERVICE_ACCOUNT_FILE = "vr-saree-455416-654db90ca741.json"
